@@ -74,6 +74,7 @@ data class PhoneUiState(
     val twitchRtmpDiagnostics: RtmpDiagnostics = RtmpDiagnostics(),
     val phoneIp: String = "",
     val helperNetworkInfo: String = "",
+    val update: AppUpdateUiState = AppUpdateUiState(),
     val sessionToken: String = "",
     val lastStatus: String = "",
     val framesReceived: Long = 0,

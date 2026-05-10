@@ -240,7 +240,13 @@ GitHub can build and publish APKs, but do not commit signing keys or API secrets
 - `ANDROID_KEY_ALIAS`
 - `ANDROID_KEY_PASSWORD`
 
-For public direct APK updates, the app should later add a settings action that checks a public release endpoint, compares `versionCode`, downloads the APK, then opens Android's package installer. If the GitHub repo stays private, do not put a GitHub token in the APK; use Play Store/Firebase or a small public update JSON endpoint instead.
+For public direct APK updates, the phone app Settings screen has a `Check & Install Update` button. It checks the latest public GitHub Release, finds a `.apk` asset, compares the release tag/body with the installed app version, downloads the APK when it is newer, then opens Android's package installer. If the GitHub repo stays private, do not put a GitHub token in the APK; use Play Store/Firebase or a small public update JSON endpoint instead.
+
+Release naming expected by the in-app updater:
+
+- Use tags like `v0.1.1`.
+- Prefer tags like `v0.1.1+2` or add `versionCode: 2` in the release body when you want strict `versionCode` comparison.
+- Attach the phone APK to the release. If multiple APKs are attached, names containing `phone` or `rokid-live-studio` are preferred over helper/glasses APKs.
 
 ## Current MVP Notes
 

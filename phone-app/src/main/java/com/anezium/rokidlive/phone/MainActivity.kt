@@ -98,6 +98,7 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import java.io.File
 import kotlin.math.roundToInt
 import java.io.IOException
 import java.util.ArrayDeque
@@ -122,6 +123,7 @@ class MainActivity : ComponentActivity() {
     private lateinit var twitchPublisher: YoutubeRtmpPublisher
     private lateinit var twitchDeviceAuthApi: TwitchDeviceAuthorizationApi
     private lateinit var twitchApi: TwitchApi
+    private lateinit var updateManager: GitHubUpdateManager
     private lateinit var preferences: SharedPreferences
     private lateinit var secretStore: SecretStore
     private var youtubeDeviceAuthJob: Job? = null
@@ -148,12 +150,19 @@ class MainActivity : ComponentActivity() {
         window.navigationBarColor = android.graphics.Color.rgb(5, 7, 6)
         preferences = getSharedPreferences("rokid_live_studio", MODE_PRIVATE)
         secretStore = SecretStore(preferences)
+        updateManager = GitHubUpdateManager(this)
+        val installedVersion = updateManager.installedVersion()
         youtubeDeviceRefreshToken = secretStore.getString(PREF_YOUTUBE_DEVICE_REFRESH_TOKEN)
         twitchDeviceRefreshToken = secretStore.getString(PREF_TWITCH_DEVICE_REFRESH_TOKEN)
         val selectedPreset = VideoPreset.fromName(preferences.getString(PREF_VIDEO_PRESET, "").orEmpty())
         val phoneIp = NetworkAddresses.firstIpv4Address().orEmpty()
         uiState = uiState.copy(
             phoneIp = phoneIp,
+            update = AppUpdateUiState(
+                currentVersionName = installedVersion.versionName,
+                currentVersionCode = installedVersion.versionCode,
+                status = "Current version ${installedVersion.versionName} (${installedVersion.versionCode})"
+            ),
             sessionToken = UUID.randomUUID().toString(),
             selectedPreset = selectedPreset,
             previewRotationDegrees = loadPreviewRotation(selectedPreset),
@@ -356,6 +365,7 @@ class MainActivity : ComponentActivity() {
                 onStopYoutube = { stopYoutubeLive() },
                 onStopStream = { stopStream() },
                 onOpenReleases = { openUrl("https://github.com/Anezium/Rokid-Live-Studio/releases") },
+                onUpdateAction = { handleUpdateAction() },
                 onRequestKeyFrame = { cxr.requestKeyFrame() }
             )
         }
@@ -1082,6 +1092,148 @@ class MainActivity : ComponentActivity() {
 
     private fun openUrl(url: String) {
         startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
+    }
+
+    private fun handleUpdateAction() {
+        val update = uiState.update
+        if (update.checking || update.downloading) return
+        if (!update.available) {
+            checkForUpdates(downloadIfAvailable = true)
+            return
+        }
+        val apkFile = update.apkPath.takeIf { it.isNotBlank() }?.let(::File)
+        if (apkFile != null && apkFile.exists()) {
+            installUpdateFile(apkFile)
+            return
+        }
+        downloadAndInstallUpdate()
+    }
+
+    private fun checkForUpdates(downloadIfAvailable: Boolean = false) {
+        lifecycleScope.launch {
+            val installed = updateManager.installedVersion()
+            updateUi {
+                copy(
+                    currentVersionName = installed.versionName,
+                    currentVersionCode = installed.versionCode,
+                    checking = true,
+                    downloading = false,
+                    status = "Checking GitHub Releases...",
+                    apkPath = ""
+                )
+            }
+            runCatching {
+                updateManager.fetchLatestRelease()
+            }.onSuccess { latest ->
+                val available = latest.isNewerThan(installed)
+                updateUi {
+                    copy(
+                        checking = false,
+                        available = available,
+                        latestTag = latest.tagName,
+                        latestVersionName = latest.versionName,
+                        latestVersionCode = latest.versionCode,
+                        releaseUrl = latest.releaseUrl,
+                        releaseNotes = latest.releaseNotes,
+                        apkName = latest.apkName,
+                        apkUrl = latest.apkDownloadUrl,
+                        status = if (available) {
+                            "Update available: ${latest.title}"
+                        } else {
+                            "You're up to date: ${installed.versionName} (${installed.versionCode})"
+                        }
+                    )
+                }
+                if (available && downloadIfAvailable) {
+                    downloadAndInstallUpdate()
+                }
+            }.onFailure { throwable ->
+                updateUi {
+                    copy(
+                        checking = false,
+                        available = false,
+                        status = "Update check failed: ${throwable.message ?: "unknown error"}"
+                    )
+                }
+            }
+        }
+    }
+
+    private fun downloadAndInstallUpdate() {
+        val update = uiState.update
+        val release = update.toGitHubReleaseUpdate() ?: run {
+            checkForUpdates()
+            return
+        }
+        if (!updateManager.canInstallPackages()) {
+            updateUi {
+                copy(status = "Allow installs from Rokid Live Studio, then tap update again.")
+            }
+            updateManager.openInstallPermissionSettings()
+            return
+        }
+        lifecycleScope.launch {
+            updateUi {
+                copy(
+                    downloading = true,
+                    status = "Downloading ${release.apkName}..."
+                )
+            }
+            runCatching {
+                updateManager.downloadApk(release)
+            }.onSuccess { file ->
+                updateUi {
+                    copy(
+                        downloading = false,
+                        apkPath = file.absolutePath,
+                        status = "Downloaded ${file.name}; opening installer..."
+                    )
+                }
+                installUpdateFile(file)
+            }.onFailure { throwable ->
+                updateUi {
+                    copy(
+                        downloading = false,
+                        status = "Download failed: ${throwable.message ?: "unknown error"}"
+                    )
+                }
+            }
+        }
+    }
+
+    private fun installUpdateFile(file: File) {
+        if (!updateManager.canInstallPackages()) {
+            updateUi {
+                copy(status = "Allow installs from Rokid Live Studio, then tap update again.")
+            }
+            updateManager.openInstallPermissionSettings()
+            return
+        }
+        runCatching {
+            updateManager.installApk(file)
+        }.onSuccess {
+            updateUi { copy(status = "Android package installer opened") }
+        }.onFailure { throwable ->
+            updateUi { copy(status = "Install failed: ${throwable.message ?: "unknown error"}") }
+        }
+    }
+
+    private fun updateUi(block: AppUpdateUiState.() -> AppUpdateUiState) {
+        uiState = uiState.copy(update = uiState.update.block())
+    }
+
+    private fun AppUpdateUiState.toGitHubReleaseUpdate(): GitHubReleaseUpdate? {
+        if (apkUrl.isBlank() || apkName.isBlank()) return null
+        return GitHubReleaseUpdate(
+            tagName = latestTag,
+            versionName = latestVersionName,
+            versionCode = latestVersionCode,
+            title = latestTag.ifBlank { latestVersionName.ifBlank { apkName } },
+            releaseUrl = releaseUrl,
+            releaseNotes = releaseNotes,
+            apkName = apkName,
+            apkDownloadUrl = apkUrl
+        )
     }
 
     private fun copyToClipboard(label: String, text: String) {
@@ -2205,6 +2357,7 @@ private fun PhoneScreen(
     onStopYoutube: () -> Unit,
     onStopStream: () -> Unit,
     onOpenReleases: () -> Unit,
+    onUpdateAction: () -> Unit,
     onRequestKeyFrame: () -> Unit
 ) {
     var selectedTab by remember { mutableStateOf(StudioTab.HOME) }
@@ -2305,7 +2458,8 @@ private fun PhoneScreen(
                 )
                 StudioTab.SETTINGS -> SettingsStudioScreen(
                     state = state,
-                    onOpenReleases = onOpenReleases
+                    onOpenReleases = onOpenReleases,
+                    onUpdateAction = onUpdateAction
                 )
             }
 
@@ -3164,8 +3318,18 @@ private fun TwitchStudioScreen(
 @Composable
 private fun SettingsStudioScreen(
     state: PhoneUiState,
-    onOpenReleases: () -> Unit
+    onOpenReleases: () -> Unit,
+    onUpdateAction: () -> Unit
 ) {
+    val update = state.update
+    val updateButtonText = when {
+        update.checking -> "Checking..."
+        update.downloading -> "Downloading..."
+        update.available && update.apkPath.isNotBlank() -> "Install Downloaded Update"
+        update.available -> "Download & Install Update"
+        else -> "Check & Install Update"
+    }
+    val updateEnabled = !update.checking && !update.downloading
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -3182,6 +3346,7 @@ private fun SettingsStudioScreen(
                 }
                 MiniMetric("Phone package", "com.anezium.rokidlive.phone")
                 MiniMetric("Glasses helper", "com.anezium.rokidlive.glasses")
+                MiniMetric("Installed version", "${update.currentVersionName} (${update.currentVersionCode})")
                 MiniMetric("Selected resolution", state.selectedPreset.youtubeResolutionLabel(state.previewRotationDegrees))
             }
         }
@@ -3192,15 +3357,46 @@ private fun SettingsStudioScreen(
                     Text("Updates", color = StudioText, fontSize = 20.sp, fontWeight = FontWeight.Bold)
                 }
                 Text(
-                    "Ship APKs through GitHub Releases, then add an in-app update checker or use Play Store internal testing.",
+                    update.status.ifBlank {
+                        "Check public GitHub Releases, download the latest phone APK, then open Android's package installer."
+                    },
                     color = StudioMuted,
                     fontSize = 15.sp,
                     lineHeight = 21.sp
                 )
+                if (update.available) {
+                    StudioInfoCard(
+                        label = "Latest release",
+                        value = listOfNotNull(
+                            update.latestVersionName.ifBlank { update.latestTag }.takeIf { it.isNotBlank() },
+                            update.apkName.takeIf { it.isNotBlank() }
+                        ).joinToString(" / ").ifBlank { "APK available" },
+                        icon = StudioIcon.BROADCAST
+                    )
+                }
                 StudioPrimaryButton(
-                    text = "Open GitHub Releases",
+                    text = updateButtonText,
                     icon = StudioIcon.EXTERNAL,
+                    enabled = updateEnabled,
+                    onClick = onUpdateAction
+                )
+                CompactTextAction(
+                    text = "Open GitHub Releases",
                     onClick = onOpenReleases
+                )
+            }
+        }
+        StudioCard {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                    IconGlyph(StudioIcon.KEY, StudioGreen, Modifier.size(28.dp))
+                    Text("Release naming", color = StudioText, fontSize = 20.sp, fontWeight = FontWeight.Bold)
+                }
+                Text(
+                    "Use tags like v0.1.1 or v0.1.1+2. If the release body contains `versionCode: 2`, the app uses that for comparison.",
+                    color = StudioMuted,
+                    fontSize = 14.sp,
+                    lineHeight = 20.sp
                 )
             }
         }
