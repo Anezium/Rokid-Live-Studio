@@ -226,7 +226,8 @@ class TwitchApi {
     private fun String.urlEncode(): String = URLEncoder.encode(this, Charsets.UTF_8.name())
 
     companion object {
-        const val DEFAULT_INGEST_SERVER = "rtmp://live.twitch.tv/app"
+        const val DEFAULT_INGEST_SERVER = "rtmp://ingest.global-contribute.live-video.net/app"
+        const val LEGACY_INGEST_SERVER = "rtmp://live.twitch.tv/app"
         private const val HELIX = "https://api.twitch.tv/helix"
         private const val INGESTS = "https://ingest.twitch.tv/ingests"
     }

@@ -25,10 +25,12 @@ class YoutubeNetworkSelector(context: Context) {
             Candidate(
                 network = network,
                 capabilities = capabilities,
-                score = score(capabilities) + if (network == activeNetwork) ACTIVE_NETWORK_BONUS else 0
+                score = score(capabilities) + if (network == activeNetwork) ACTIVE_NETWORK_BONUS else 0,
+                isVpn = capabilities.isVpn()
             )
         }
-        val best = candidates.maxByOrNull { it.score }
+        val preferredCandidates = candidates.filterNot { it.isVpn }.ifEmpty { candidates }
+        val best = preferredCandidates.maxByOrNull { it.score }
             ?: return YoutubeNetworkBinding(null, "default network")
         return YoutubeNetworkBinding(best.network.socketFactory, label(best.capabilities))
     }
@@ -39,23 +41,30 @@ class YoutubeNetworkSelector(context: Context) {
             capabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) -> 250
             capabilities.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET) -> 240
             else -> 100
-        }
+        } + if (capabilities.isVpn()) VPN_PENALTY else 0
 
     private fun label(capabilities: NetworkCapabilities): String =
         when {
-            capabilities.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) -> "cellular internet"
-            capabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) -> "Wi-Fi internet"
+            capabilities.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) -> "cellular internet (no VPN)"
+            capabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) -> "Wi-Fi internet (no VPN)"
             capabilities.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET) -> "ethernet internet"
+            capabilities.isVpn() -> "VPN internet"
             else -> "validated internet"
         }
+
+    private fun NetworkCapabilities.isVpn(): Boolean =
+        hasTransport(NetworkCapabilities.TRANSPORT_VPN) ||
+            !hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN)
 
     private data class Candidate(
         val network: Network,
         val capabilities: NetworkCapabilities,
-        val score: Int
+        val score: Int,
+        val isVpn: Boolean
     )
 
     private companion object {
         private const val ACTIVE_NETWORK_BONUS = 500
+        private const val VPN_PENALTY = -1_000
     }
 }

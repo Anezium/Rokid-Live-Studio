@@ -1489,7 +1489,7 @@ class MainActivity : ComponentActivity() {
         twitchPublisher.start(
             streamKey = streamKey,
             preset = uiState.selectedPreset,
-            serverUrl = uiState.twitchIngestServerUrl.ifBlank { TwitchApi.DEFAULT_INGEST_SERVER }
+            serverUrl = normalizedTwitchIngestServer(uiState.twitchIngestServerUrl)
         )
         if (willTranscode) {
             startOrUpdateTwitchVideoPipeline()
@@ -1531,6 +1531,11 @@ class MainActivity : ComponentActivity() {
         stopCameraTransport()
         uiState = uiState.copy(twitchLive = false)
     }
+
+    private fun normalizedTwitchIngestServer(serverUrl: String): String =
+        serverUrl.trim()
+            .ifBlank { TwitchApi.DEFAULT_INGEST_SERVER }
+            .let { if (it == TwitchApi.LEGACY_INGEST_SERVER) TwitchApi.DEFAULT_INGEST_SERVER else it }
 
     private fun startYoutubeBroadcastWhenRtmpReady() {
         val broadcastId = uiState.youtubeBroadcastId
