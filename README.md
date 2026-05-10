@@ -10,6 +10,7 @@ The glasses helper keeps the glasses side as light as possible: it opens the Wi-
 
 With OAuth mode, Rokid Live Studio can also read YouTube or Twitch chat on the phone and render chat messages inside the glasses helper overlay.
 
+
 <p align="center">
   <img src="Rokid_Live_Studio_screenshot1.jpg" width="260" alt="Rokid Live Studio home screen" />
   <img src="Rokid_Live_Studio_screenshot2.jpg" width="260" alt="Rokid Live Studio YouTube screen" />
