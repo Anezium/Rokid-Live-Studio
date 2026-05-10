@@ -33,6 +33,7 @@ class CxrPhoneController(
     private val onAuthorized: (Boolean, String) -> Unit,
     private val onConnectionChanged: (cxr: Boolean, bt: Boolean) -> Unit,
     private val onHelperStatus: (StatusMessage) -> Unit,
+    private val onHelperInstallStatus: (message: String, busy: Boolean) -> Unit,
     private val onLog: (String) -> Unit,
     private val onError: (String, Throwable?) -> Unit
 ) {
@@ -80,10 +81,24 @@ class CxrPhoneController(
             installStarted = false
             pendingInstallApk?.delete()
             pendingInstallApk = null
-            onLog("Helper install: $success")
+            val message = if (success) {
+                "Helper installed on glasses. Tap Launch Helper App."
+            } else {
+                "Helper install failed. Retry after checking Hi Rokid."
+            }
+            onHelperInstallStatus(message, false)
+            onLog(message)
         }
         override fun onUnInstallAppResult(success: Boolean) = onLog("Helper uninstall: $success")
-        override fun onOpenAppResult(success: Boolean) = onLog("Helper open: $success")
+        override fun onOpenAppResult(success: Boolean) {
+            val message = if (success) {
+                "Helper opened on glasses."
+            } else {
+                "Helper launch failed. Install helper, then retry."
+            }
+            onHelperInstallStatus(message, false)
+            onLog(message)
+        }
         override fun onStopAppResult(success: Boolean) = onLog("Helper stop: $success")
         override fun onGlassAppResume(resumed: Boolean) = onLog("Helper resumed: $resumed")
         override fun onQueryAppResult(installed: Boolean) = onLog("Helper installed: $installed")
@@ -154,28 +169,58 @@ class CxrPhoneController(
     }
 
     fun installHelper() {
+        onHelperInstallStatus("Preparing helper APK...", true)
+        if (token.isBlank()) {
+            val message = "Authorize Rokid before installing helper."
+            onHelperInstallStatus(message, false)
+            onError(message, null)
+            return
+        }
         if (link == null) {
+            onHelperInstallStatus("Connecting to Rokid service...", true)
             connect()
         }
         val apk = extractBundledHelperApk() ?: helperApkCandidates().firstOrNull { it.exists() && it.isFile }
         if (apk == null) {
-            onError("Helper APK not found. Put glasses-helper-debug.apk in app files, Download, or DCIM/Rokid.", null)
+            val message = "Helper APK not found in this phone build."
+            onHelperInstallStatus(message, false)
+            onError(message, null)
             return
         }
-        val packageName = readPackageName(apk)
+        val packageName = runCatching { readPackageName(apk) }.getOrElse {
+            val message = "Could not read helper APK."
+            onHelperInstallStatus(message, false)
+            onError(message, it)
+            return
+        }
         if (packageName != Protocol.HELPER_PACKAGE) {
-            onError("Bundled helper package mismatch: $packageName", null)
+            val message = "Bundled helper package mismatch: $packageName"
+            onHelperInstallStatus(message, false)
+            onError(message, null)
             return
         }
         pendingInstallApk = apk
         installStarted = false
-        onLog("Helper staged. Waiting CXR-L + BT before upload...")
+        val message = if (cxrConnected && btConnected) {
+            "Uploading helper APK to glasses..."
+        } else {
+            "Waiting for CXR-L and Bluetooth before install..."
+        }
+        onHelperInstallStatus(message, true)
+        onLog(message)
         maybeUploadPendingHelper()
     }
 
     fun launchHelper() {
-        link?.appStart(Protocol.HELPER_MAIN_ACTIVITY, appCallback)
-            ?: onError("CXR is not connected", null)
+        val activeLink = link
+        if (activeLink == null) {
+            val message = "Connect Rokid before launching helper."
+            onHelperInstallStatus(message, false)
+            onError(message, null)
+            return
+        }
+        onHelperInstallStatus("Opening helper on glasses...", true)
+        activeLink.appStart(Protocol.HELPER_MAIN_ACTIVITY, appCallback)
     }
 
     fun stopHelper() {
@@ -254,8 +299,15 @@ class CxrPhoneController(
         val activeLink = link ?: return
         if (installStarted || !cxrConnected || !btConnected) return
         installStarted = true
-        onLog("Uploading helper APK through Hi Rokid...")
-        activeLink.appUploadAndInstall(apk.absolutePath, appCallback)
+        onHelperInstallStatus("Uploading helper APK to glasses...", true)
+        onLog("Uploading helper APK to glasses...")
+        runCatching {
+            activeLink.appUploadAndInstall(apk.absolutePath, appCallback)
+        }.onFailure {
+            installStarted = false
+            onHelperInstallStatus("Helper upload failed. Retry install.", false)
+            onError("Helper upload failed", it)
+        }
     }
 
     private fun bindGlobalHiRokidService(link: CXRLink, authToken: String): Boolean {

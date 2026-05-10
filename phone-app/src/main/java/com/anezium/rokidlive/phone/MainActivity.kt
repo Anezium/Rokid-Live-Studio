@@ -314,6 +314,15 @@ class MainActivity : ComponentActivity() {
                     }
                 }
             },
+            onHelperInstallStatus = { message, busy ->
+                onMain {
+                    uiState = uiState.copy(
+                        helperInstallStatus = message,
+                        helperInstallBusy = busy,
+                        lastStatus = message
+                    )
+                }
+            },
             onLog = { log -> onMain { uiState = uiState.copy(lastStatus = log) } },
             onError = { message, throwable -> onMain { setError(message, throwable) } }
         )
@@ -2671,18 +2680,19 @@ private fun HomeStudioScreen(
 
         StudioActionCard(
             title = "Launch Helper App",
-            subtitle = "Open the glasses companion",
+            subtitle = state.helperInstallStatus.ifBlank { "Open the glasses companion" },
             icon = StudioIcon.EXTERNAL,
             onClick = onLaunchHelper,
             trailing = {
+                val installBusy = state.helperInstallBusy
                 Text(
-                    text = "Install",
-                    color = StudioGreen,
+                    text = if (installBusy) "Installing..." else "Install",
+                    color = if (installBusy) StudioMuted else StudioGreen,
                     fontSize = 13.sp,
                     fontWeight = FontWeight.SemiBold,
                     modifier = Modifier
                         .clip(RoundedCornerShape(10.dp))
-                        .clickable(onClick = onInstallHelper)
+                        .clickable(enabled = !installBusy, onClick = onInstallHelper)
                         .padding(horizontal = 10.dp, vertical = 6.dp)
                 )
             }
