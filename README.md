@@ -4,7 +4,7 @@
 
 # Rokid Live Studio
 
-Android/Kotlin MVP for receiving the Rokid Glasses camera/microphone stream on the phone, then streaming from the phone to YouTube or Twitch.
+Android/Kotlin app for receiving the Rokid Glasses camera/microphone stream on the phone, then streaming from the phone to YouTube or Twitch.
 
 The glasses helper keeps the glasses side as light as possible: it opens the Wi-Fi Direct group, captures the glasses camera/mic, and sends the media to the phone. The phone does the heavier work: preview, rotation/mirror, encoding, RTMP/RTMPS publishing, YouTube/Twitch API calls, and chat polling.
 
@@ -56,8 +56,6 @@ Use this if you want the easiest setup and do not need the app to control the Yo
 7. Tap `Start stream with key`.
 
 In this mode the app only sends video and audio. It cannot change the title, visibility, category, thumbnail, or chat settings. Those options are handled in YouTube Studio and are disabled in the app.
-
-This is the easiest mode to distribute because there is no OAuth, no Google verification, and no user account connection.
 
 The `YouTube bitrate` setting only changes the phone's outgoing encoded RTMPS stream. It does not change the Rokid camera capture. If the phone preview is clean but YouTube looks blocky or stalls, lower the bitrate first. If that still happens at low bitrates, the likely bottleneck is the phone's upload/RTMPS path rather than the glasses camera or Wi-Fi Direct.
 
@@ -120,12 +118,12 @@ No extra Google API is currently needed for categories or chat. The app uses You
    - App name: `Rokid Live Studio`
    - User support email
    - Developer contact email
-4. Add the YouTube scope used by the MVP:
+4. Add the YouTube scope used by the app:
    - `https://www.googleapis.com/auth/youtube`
 5. Save the consent screen.
 6. While the app is in testing mode, add every Google account that should be allowed to sign in under `Test users`.
 
-The `https://www.googleapis.com/auth/youtube` scope is broad, but the MVP needs account-level YouTube management to create lives, bind streams, update metadata/category, transition broadcasts, and read live chat. If the app becomes public, Google may require OAuth verification before normal users can connect without warnings or caps.
+The `https://www.googleapis.com/auth/youtube` scope is broad, but the app needs account-level YouTube management to create lives, bind streams, update metadata/category, transition broadcasts, and read live chat.
 
 ### 4. Create The TV OAuth Client
 
@@ -138,7 +136,7 @@ The `https://www.googleapis.com/auth/youtube` scope is broad, but the MVP needs 
 7. Copy the generated `Client ID`.
 8. Copy the generated `Client secret`.
 
-Google's device-flow docs note that apps distributed on devices cannot truly keep secrets private. In this MVP, the client secret is entered by the user in the app and stored encrypted on the phone. Do not commit your real client secret to Git.
+Google's device-flow docs note that apps distributed on devices cannot truly keep secrets private. The client secret is entered by the user in the app and stored encrypted on the phone. Do not commit your real client secret to Git.
 
 ### 5. Paste The Client In The Android App
 
@@ -208,12 +206,12 @@ Official references:
 2. Click `Register Your Application`.
 3. Name it, for example `Rokid Live Studio`.
 4. Choose `Public` as the client type. Android APKs cannot keep a client secret private.
-5. If Twitch asks for an OAuth Redirect URL, enter `http://localhost`. The MVP uses device-code login, so this URL is not used by the phone flow.
+5. If Twitch asks for an OAuth Redirect URL, enter `http://localhost`. Rokid Live Studio uses device-code login, so this URL is not used by the phone flow.
 6. Choose an application category such as `Application Integration`.
 7. Create the app.
 8. Copy the `Client ID`.
 
-The MVP does not need a Twitch client secret on the phone. Device-code login uses the public Client ID.
+The app does not need a Twitch client secret on the phone. Device-code login uses the public Client ID.
 
 ### 2. Paste The Client ID In The Android App
 
@@ -230,7 +228,7 @@ The MVP does not need a Twitch client secret on the phone. Device-code login use
 11. Set the title, category, resolution, bitrate, and helper chat options.
 12. Tap `Start Twitch Stream`.
 
-### 3. Twitch OAuth Scopes Used By The MVP
+### 3. Twitch OAuth Scopes Used By The App
 
 The app requests:
 
@@ -240,7 +238,7 @@ The app requests:
 
 After linking, the app stores the Twitch refresh token encrypted on the phone. `Sign out` removes the stored Twitch refresh token.
 
-## Current MVP Notes
+## Current Notes
 
 - The helper app is responsible for opening Wi-Fi Direct on the glasses.
 - The phone joins the helper group and keeps the heavy network/YouTube/Twitch work.
