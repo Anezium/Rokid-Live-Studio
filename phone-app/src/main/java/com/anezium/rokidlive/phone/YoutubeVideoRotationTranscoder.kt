@@ -24,6 +24,7 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 
 class YoutubeVideoRotationTranscoder(
+    private val platformName: String = "YouTube",
     private val inputWidth: Int,
     private val inputHeight: Int,
     private val outputWidth: Int,
@@ -47,7 +48,7 @@ class YoutubeVideoRotationTranscoder(
     fun start() {
         if (!running.compareAndSet(false, true)) return
         inputKeyframeRequired.set(false)
-        thread = Thread(::runLoop, "rls-youtube-rotator").also { it.start() }
+        thread = Thread(::runLoop, "rls-${platformName.lowercase()}-rotator").also { it.start() }
     }
 
     fun configure(configPayload: ByteArray) {
@@ -76,7 +77,7 @@ class YoutubeVideoRotationTranscoder(
         if (commands.offer(command)) return
         when (command) {
             is Command.Configure -> {
-                requestInputResync("YouTube rotation config changed; waiting for a clean Rokid keyframe")
+                requestInputResync("$platformName rotation config changed; waiting for a clean Rokid keyframe")
                 commands.offer(command)
             }
             Command.RequestKeyframe -> Unit
@@ -91,7 +92,7 @@ class YoutubeVideoRotationTranscoder(
             if (command.keyFrame) inputKeyframeRequired.set(false)
             return
         }
-        requestInputResync("YouTube rotation queue is full; waiting for a clean Rokid keyframe")
+        requestInputResync("$platformName rotation queue is full; waiting for a clean Rokid keyframe")
         if (command.keyFrame && commands.offer(command)) {
             inputKeyframeRequired.set(false)
         }
@@ -102,7 +103,7 @@ class YoutubeVideoRotationTranscoder(
         runCatching {
             val mirrorLabel = if (mirrorHorizontally) ", mirror fix" else ""
             onStatus(
-                "YouTube rotation pipeline: ${inputWidth}x${inputHeight} -> " +
+                "$platformName rotation pipeline: ${inputWidth}x${inputHeight} -> " +
                     "${outputWidth}x${outputHeight}, rot ${rotationDegrees}$mirrorLabel"
             )
             while (running.get()) {
@@ -117,7 +118,7 @@ class YoutubeVideoRotationTranscoder(
                         if (localWorker != null) {
                             if (command.keyFrame) localWorker.requestKeyFrame()
                             if (!localWorker.processFrame(command.payload, command.timestampUs)) {
-                                requestInputResync("YouTube decoder is busy; waiting for a clean Rokid keyframe")
+                                requestInputResync("$platformName decoder is busy; waiting for a clean Rokid keyframe")
                             }
                         }
                     }
@@ -126,7 +127,7 @@ class YoutubeVideoRotationTranscoder(
                 }
             }
         }.onFailure {
-            if (running.get()) onError("YouTube rotation pipeline failed", it)
+            if (running.get()) onError("$platformName rotation pipeline failed", it)
         }
         running.set(false)
         worker?.release()

@@ -52,6 +52,7 @@ dependencies {
     implementation(libs.androidx.compose.ui.tooling.preview)
     implementation(libs.androidx.compose.material3)
     implementation(libs.kotlinx.coroutines.android)
+    implementation(libs.okhttp)
     implementation(libs.play.services.auth)
     implementation(libs.rokid.client.l)
     debugImplementation(libs.androidx.compose.ui.tooling)

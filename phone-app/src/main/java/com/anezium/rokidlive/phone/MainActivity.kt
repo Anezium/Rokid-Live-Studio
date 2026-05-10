@@ -118,6 +118,9 @@ class MainActivity : ComponentActivity() {
     private lateinit var youtubeAuth: YoutubeAuthorizationManager
     private lateinit var youtubeDeviceAuthApi: YoutubeDeviceAuthorizationApi
     private lateinit var youtubeLiveApi: YoutubeLiveApi
+    private lateinit var twitchPublisher: YoutubeRtmpPublisher
+    private lateinit var twitchDeviceAuthApi: TwitchDeviceAuthorizationApi
+    private lateinit var twitchApi: TwitchApi
     private lateinit var preferences: SharedPreferences
     private lateinit var secretStore: SecretStore
     private var youtubeDeviceAuthJob: Job? = null
@@ -126,9 +129,16 @@ class MainActivity : ComponentActivity() {
     private var youtubeChatJob: Job? = null
     private var youtubeChatStopRequested = false
     private var youtubeVideoTranscoder: YoutubeVideoRotationTranscoder? = null
+    private var twitchDeviceAuthJob: Job? = null
+    private var twitchChatClient: TwitchChatClient? = null
+    private var twitchChatStopRequested = false
+    private var twitchVideoTranscoder: YoutubeVideoRotationTranscoder? = null
     private var youtubeDeviceAccessToken: String = ""
     private var youtubeDeviceRefreshToken: String = ""
     private var youtubeDeviceAccessTokenExpiresAtMs: Long = 0L
+    private var twitchDeviceAccessToken: String = ""
+    private var twitchDeviceRefreshToken: String = ""
+    private var twitchDeviceAccessTokenExpiresAtMs: Long = 0L
     private var connectAfterAuthorization = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -138,6 +148,7 @@ class MainActivity : ComponentActivity() {
         preferences = getSharedPreferences("rokid_live_studio", MODE_PRIVATE)
         secretStore = SecretStore(preferences)
         youtubeDeviceRefreshToken = secretStore.getString(PREF_YOUTUBE_DEVICE_REFRESH_TOKEN)
+        twitchDeviceRefreshToken = secretStore.getString(PREF_TWITCH_DEVICE_REFRESH_TOKEN)
         val selectedPreset = VideoPreset.fromName(preferences.getString(PREF_VIDEO_PRESET, "").orEmpty())
         val phoneIp = NetworkAddresses.firstIpv4Address().orEmpty()
         uiState = uiState.copy(
@@ -168,6 +179,29 @@ class MainActivity : ComponentActivity() {
             youtubeChatMaxMessages = preferences.getInt(
                 PREF_YOUTUBE_CHAT_MAX_MESSAGES,
                 Protocol.DEFAULT_CHAT_MAX_MESSAGES
+            ).coerceIn(0, Protocol.MAX_CHAT_MESSAGE_COUNT),
+            twitchStreamKey = secretStore.getString(PREF_TWITCH_STREAM_KEY),
+            twitchTitle = preferences.getString(PREF_TWITCH_TITLE, defaultTwitchTitle()).orEmpty(),
+            twitchCategoryId = preferences.getString(PREF_TWITCH_CATEGORY_ID, TwitchCategory.Default.id).orEmpty()
+                .ifBlank { TwitchCategory.Default.id },
+            twitchDeviceClientId = preferences.getString(PREF_TWITCH_DEVICE_CLIENT_ID, "").orEmpty(),
+            twitchConnected = twitchDeviceRefreshToken.isNotBlank(),
+            twitchAccount = if (twitchDeviceRefreshToken.isBlank()) "" else "device linked",
+            twitchUserId = preferences.getString(PREF_TWITCH_USER_ID, "").orEmpty(),
+            twitchUserLogin = preferences.getString(PREF_TWITCH_USER_LOGIN, "").orEmpty(),
+            twitchChannelTitle = preferences.getString(PREF_TWITCH_CHANNEL_TITLE, "").orEmpty(),
+            twitchIngestServerUrl = preferences.getString(PREF_TWITCH_INGEST_SERVER_URL, TwitchApi.DEFAULT_INGEST_SERVER)
+                .orEmpty()
+                .ifBlank { TwitchApi.DEFAULT_INGEST_SERVER },
+            twitchVideoBitrateOverride = preferences.getInt(PREF_TWITCH_VIDEO_BITRATE, 0),
+            twitchChatEnabled = preferences.getBoolean(PREF_TWITCH_CHAT_ENABLED, false),
+            twitchChatFontSizeSp = preferences.getInt(
+                PREF_TWITCH_CHAT_FONT_SIZE_SP,
+                Protocol.DEFAULT_CHAT_FONT_SIZE_SP
+            ).coerceAtLeast(1),
+            twitchChatMaxMessages = preferences.getInt(
+                PREF_TWITCH_CHAT_MAX_MESSAGES,
+                Protocol.DEFAULT_CHAT_MAX_MESSAGES
             ).coerceIn(0, Protocol.MAX_CHAT_MESSAGE_COUNT)
         )
         decoder = VideoPreviewDecoder(
@@ -181,6 +215,7 @@ class MainActivity : ComponentActivity() {
         )
         youtubeNetworkSelector = YoutubeNetworkSelector(this)
         youtubePublisher = YoutubeRtmpPublisher(
+            platformName = "YouTube",
             onStatus = { status -> onMain { uiState = uiState.copy(youtubeStatus = status, lastStatus = status) } },
             onLiveChanged = { live -> onMain { uiState = uiState.copy(youtubeLive = live) } },
             onStats = { bytes -> onMain { uiState = uiState.copy(youtubeBytesSent = bytes) } },
@@ -193,8 +228,24 @@ class MainActivity : ComponentActivity() {
                 }
             }
         )
+        twitchPublisher = YoutubeRtmpPublisher(
+            platformName = "Twitch",
+            onStatus = { status -> onMain { uiState = uiState.copy(twitchStatus = status, lastStatus = status) } },
+            onLiveChanged = { live -> onMain { uiState = uiState.copy(twitchLive = live) } },
+            onStats = { bytes -> onMain { uiState = uiState.copy(twitchBytesSent = bytes) } },
+            onError = { message, throwable -> onMain { setError(message, throwable) } },
+            networkBindingProvider = { youtubeNetworkSelector.select() },
+            onReady = { onMain { uiState = uiState.copy(twitchStatus = "Twitch stream is live") } },
+            onVideoBackpressure = {
+                onMain {
+                    twitchVideoTranscoder?.requestKeyFrame() ?: cxr.requestKeyFrame()
+                }
+            }
+        )
         youtubeLiveApi = YoutubeLiveApi()
         youtubeDeviceAuthApi = YoutubeDeviceAuthorizationApi()
+        twitchApi = TwitchApi()
+        twitchDeviceAuthApi = TwitchDeviceAuthorizationApi()
         youtubeAuth = YoutubeAuthorizationManager(
             activity = this,
             onStatus = { status -> onMain { uiState = uiState.copy(youtubeStatus = status, lastStatus = status) } },
@@ -278,6 +329,20 @@ class MainActivity : ComponentActivity() {
                 onDisconnectYoutube = { disconnectYoutube() },
                 onRefreshYoutubeChannel = { refreshYoutubeChannel() },
                 onCreateYoutubeLive = { createYoutubeLive() },
+                onTwitchKeyChanged = { setTwitchStreamKey(it) },
+                onTwitchTitleChanged = { setTwitchTitle(it) },
+                onTwitchDeviceClientIdChanged = { setTwitchDeviceClientId(it) },
+                onTwitchCategorySelected = { selectTwitchCategory(it) },
+                onTwitchBitrateSelected = { selectTwitchVideoBitrate(it) },
+                onTwitchChatEnabledChange = { setTwitchChatEnabled(it) },
+                onTwitchChatFontSizeSelected = { setTwitchChatFontSize(it) },
+                onTwitchChatMaxMessagesSelected = { setTwitchChatMaxMessages(it) },
+                onStartTwitchDeviceAuth = { startTwitchDeviceAuth() },
+                onOpenTwitchDocs = { openTwitchDocs() },
+                onDisconnectTwitch = { disconnectTwitch() },
+                onRefreshTwitchChannel = { refreshTwitchChannel() },
+                onStartTwitch = { startTwitchLive() },
+                onStopTwitch = { stopTwitchLive() },
                 onPresetSelected = { selectPreset(it) },
                 onPreviewRotationSelected = { selectPreviewRotation(it) },
                 onStartYoutube = { startYoutubeLive() },
@@ -317,9 +382,13 @@ class MainActivity : ComponentActivity() {
         p2pConnector?.stop()
         youtubeGoLiveJob?.cancel()
         youtubeCompleteJob?.cancel()
+        twitchDeviceAuthJob?.cancel()
         stopYoutubeChat(clearHelper = true)
+        stopTwitchChat(clearHelper = true)
         youtubeVideoTranscoder?.stop()
+        twitchVideoTranscoder?.stop()
         youtubePublisher.stop()
+        twitchPublisher.stop()
         decoder.release()
         super.onDestroy()
     }
@@ -366,15 +435,19 @@ class MainActivity : ComponentActivity() {
     private fun handleIncomingVideoConfig(payload: ByteArray) {
         lastVideoConfig = payload
         youtubeVideoTranscoder?.configure(payload) ?: youtubePublisher.configureVideo(payload)
+        twitchVideoTranscoder?.configure(payload) ?: twitchPublisher.configureVideo(payload)
     }
 
     private fun handleIncomingVideoFrame(payload: ByteArray, timestampUs: Long, keyFrame: Boolean) {
         youtubeVideoTranscoder?.queueFrame(payload, timestampUs, keyFrame)
             ?: youtubePublisher.publishVideoFrame(payload, timestampUs, keyFrame)
+        twitchVideoTranscoder?.queueFrame(payload, timestampUs, keyFrame)
+            ?: twitchPublisher.publishVideoFrame(payload, timestampUs, keyFrame)
     }
 
     private fun handleIncomingAudioConfig(payload: ByteArray) {
         youtubePublisher.configureAudio(payload)
+        twitchPublisher.configureAudio(payload)
         if (uiState.youtubeLive) {
             onMain {
                 if (uiState.youtubeLive) {
@@ -382,10 +455,18 @@ class MainActivity : ComponentActivity() {
                 }
             }
         }
+        if (uiState.twitchLive) {
+            onMain {
+                if (uiState.twitchLive) {
+                    uiState = uiState.copy(twitchStatus = "Rokid glasses mic ready")
+                }
+            }
+        }
     }
 
     private fun handleIncomingAudioFrame(payload: ByteArray, timestampUs: Long) {
         youtubePublisher.publishAudioFrame(payload, timestampUs)
+        twitchPublisher.publishAudioFrame(payload, timestampUs)
     }
 
     private fun startStream() {
@@ -471,6 +552,7 @@ class MainActivity : ComponentActivity() {
         cxr.sendStopStream()
         cxr.sendStopP2p()
         stopYoutubeLive()
+        stopTwitchLive()
         reverseClient?.stop()
         p2pConnector?.stop()
         p2pConnector = null
@@ -482,7 +564,8 @@ class MainActivity : ComponentActivity() {
             p2pConnected = false,
             p2pEndpoint = "",
             p2pStatus = "Stopped",
-            youtubeLive = false
+            youtubeLive = false,
+            twitchLive = false
         )
     }
 
@@ -583,16 +666,25 @@ class MainActivity : ComponentActivity() {
             uiState = uiState.copy(youtubeStatus = "Stop YouTube before changing resolution")
             return
         }
+        if (uiState.twitchLive) {
+            uiState = uiState.copy(twitchStatus = "Stop Twitch before changing resolution")
+            return
+        }
         if (uiState.selectedPreset == preset) return
         preferences.edit().putString(PREF_VIDEO_PRESET, preset.name).apply()
         uiState = uiState.copy(
             selectedPreset = preset,
             previewRotationDegrees = loadPreviewRotation(preset),
-            youtubeStatus = "Preset: ${preset.label}"
+            youtubeStatus = "Preset: ${preset.label}",
+            twitchStatus = "Preset: ${preset.label}"
         )
         applySelectedPreset()
         if (uiState.youtubeLive) {
             startOrUpdateYoutubeVideoPipeline()
+            cxr.requestKeyFrame()
+        }
+        if (uiState.twitchLive) {
+            startOrUpdateTwitchVideoPipeline()
             cxr.requestKeyFrame()
         }
     }
@@ -605,6 +697,10 @@ class MainActivity : ComponentActivity() {
         uiState = uiState.copy(previewRotationDegrees = normalized)
         if (uiState.youtubeLive) {
             startOrUpdateYoutubeVideoPipeline()
+            cxr.requestKeyFrame()
+        }
+        if (uiState.twitchLive) {
+            startOrUpdateTwitchVideoPipeline()
             cxr.requestKeyFrame()
         }
     }
@@ -729,6 +825,93 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    private fun setTwitchStreamKey(streamKey: String) {
+        secretStore.putString(PREF_TWITCH_STREAM_KEY, streamKey)
+        uiState = uiState.copy(twitchStreamKey = streamKey)
+    }
+
+    private fun setTwitchTitle(title: String) {
+        preferences.edit().putString(PREF_TWITCH_TITLE, title).apply()
+        uiState = uiState.copy(twitchTitle = title)
+    }
+
+    private fun setTwitchDeviceClientId(clientId: String) {
+        preferences.edit().putString(PREF_TWITCH_DEVICE_CLIENT_ID, clientId).apply()
+        uiState = uiState.copy(twitchDeviceClientId = clientId)
+    }
+
+    private fun selectTwitchCategory(category: TwitchCategory) {
+        preferences.edit().putString(PREF_TWITCH_CATEGORY_ID, category.id).apply()
+        uiState = uiState.copy(
+            twitchCategoryId = category.id,
+            twitchStatus = "Twitch category: ${category.label}"
+        )
+    }
+
+    private fun selectTwitchVideoBitrate(bitrate: Int) {
+        val normalized = bitrate.takeIf { it > 0 } ?: 0
+        preferences.edit().putInt(PREF_TWITCH_VIDEO_BITRATE, normalized).apply()
+        uiState = uiState.copy(
+            twitchVideoBitrateOverride = normalized,
+            twitchStatus = if (normalized > 0) {
+                "Twitch bitrate: ${normalized.bitrateLabel()}"
+            } else {
+                "Twitch bitrate: auto"
+            }
+        )
+    }
+
+    private fun setTwitchChatEnabled(enabled: Boolean) {
+        preferences.edit().putBoolean(PREF_TWITCH_CHAT_ENABLED, enabled).apply()
+        uiState = uiState.copy(
+            twitchChatEnabled = enabled,
+            twitchChatStatus = if (enabled) {
+                "Chat will appear in the glasses helper"
+            } else {
+                "Helper chat hidden"
+            },
+            twitchChatMessages = if (enabled) uiState.twitchChatMessages else emptyList()
+        )
+        if (enabled) {
+            sendTwitchChatStyle()
+            startTwitchChatIfPossible()
+        } else {
+            stopTwitchChat(clearHelper = true)
+        }
+    }
+
+    private fun setTwitchChatFontSize(fontSizeSp: Int) {
+        val normalized = fontSizeSp.coerceAtLeast(1)
+        preferences.edit().putInt(PREF_TWITCH_CHAT_FONT_SIZE_SP, normalized).apply()
+        uiState = uiState.copy(
+            twitchChatFontSizeSp = normalized,
+            twitchChatStatus = "Helper chat font: ${normalized}sp"
+        )
+        sendTwitchChatStyle()
+    }
+
+    private fun setTwitchChatMaxMessages(maxMessages: Int) {
+        val normalized = maxMessages.coerceIn(0, Protocol.MAX_CHAT_MESSAGE_COUNT)
+        preferences.edit().putInt(PREF_TWITCH_CHAT_MAX_MESSAGES, normalized).apply()
+        val nextMessages = uiState.twitchChatMessages.takeLast(normalized)
+        uiState = uiState.copy(
+            twitchChatMaxMessages = normalized,
+            twitchChatMessages = nextMessages,
+            twitchChatStatus = "Helper chat messages: $normalized"
+        )
+        sendTwitchChatStyle()
+        runCatching { cxr.sendChatMessages(nextMessages) }
+    }
+
+    private fun sendTwitchChatStyle() {
+        runCatching {
+            cxr.sendChatStyle(
+                fontSizeSp = uiState.twitchChatFontSizeSp,
+                maxMessages = uiState.twitchChatMaxMessages
+            )
+        }
+    }
+
     private fun connectYoutube() {
         youtubeAuth.requireToken { token -> refreshYoutubeChannel(token) }
     }
@@ -808,6 +991,80 @@ class MainActivity : ComponentActivity() {
         openUrl("https://developers.google.com/youtube/v3/guides/auth/devices")
     }
 
+    private fun startTwitchDeviceAuth() {
+        val clientId = uiState.twitchDeviceClientId.trim()
+        if (clientId.isBlank()) {
+            setError("Paste your Twitch OAuth client ID first", null)
+            return
+        }
+        twitchDeviceAuthJob?.cancel()
+        twitchDeviceAuthJob = lifecycleScope.launch {
+            runCatching {
+                uiState = uiState.copy(
+                    twitchDeviceUserCode = "",
+                    twitchDeviceVerificationUrl = "",
+                    twitchDeviceAuthPending = true,
+                    twitchStatus = "Requesting Twitch device code...",
+                    lastStatus = "Requesting Twitch device code...",
+                    error = ""
+                )
+                val code = twitchDeviceAuthApi.requestDeviceCode(clientId)
+                copyToClipboard("Twitch TV code", code.userCode)
+                uiState = uiState.copy(
+                    twitchDeviceUserCode = code.userCode,
+                    twitchDeviceVerificationUrl = code.verificationUrl,
+                    twitchStatus = "TV code copied. Opening Twitch device page...",
+                    lastStatus = "Twitch device code copied: ${code.userCode}"
+                )
+                openUrl(code.verificationUrl)
+                pollTwitchDeviceTokens(clientId, code)
+            }.onFailure { throwable ->
+                uiState = uiState.copy(twitchDeviceAuthPending = false)
+                setError("Twitch device link failed", throwable)
+            }
+        }
+    }
+
+    private suspend fun pollTwitchDeviceTokens(clientId: String, code: TwitchDeviceCode) {
+        var intervalSeconds = code.intervalSeconds.coerceAtLeast(5)
+        val expiresAtMs = System.currentTimeMillis() + code.expiresInSeconds * 1000L
+        while (System.currentTimeMillis() < expiresAtMs) {
+            delay(intervalSeconds * 1000L)
+            try {
+                val tokens = twitchDeviceAuthApi.pollForTokens(clientId, code.deviceCode)
+                storeTwitchDeviceTokens(tokens)
+                uiState = uiState.copy(
+                    twitchDeviceAuthPending = false,
+                    twitchStatus = "Twitch device linked",
+                    lastStatus = "Twitch device linked"
+                )
+                refreshTwitchChannel(tokens.accessToken)
+                return
+            } catch (exception: TwitchDeviceAuthException) {
+                when (exception.errorCode) {
+                    "authorization_pending" -> {
+                        uiState = uiState.copy(twitchStatus = "Waiting for Twitch code approval: ${code.userCode}")
+                    }
+                    "slow_down" -> {
+                        intervalSeconds += 5
+                        uiState = uiState.copy(twitchStatus = "Twitch asked to poll slower")
+                    }
+                    else -> throw exception
+                }
+            } catch (exception: IOException) {
+                uiState = uiState.copy(
+                    twitchStatus = "Network unavailable while linking Twitch. Retrying: ${code.userCode}",
+                    lastStatus = "Twitch device link network retry"
+                )
+            }
+        }
+        throw TwitchDeviceAuthException("expired_token", "Twitch device code expired")
+    }
+
+    private fun openTwitchDocs() {
+        openUrl("https://dev.twitch.tv/console/apps")
+    }
+
     private fun openUrl(url: String) {
         startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
     }
@@ -875,6 +1132,83 @@ class MainActivity : ComponentActivity() {
                     youtubeDeviceAccessToken = ""
                 }
                 setError("Check YouTube channel failed", throwable)
+            }
+        }
+    }
+
+    private fun disconnectTwitch() {
+        twitchDeviceAuthJob?.cancel()
+        stopTwitchChat(clearHelper = true)
+        val tokenToRevoke = twitchDeviceRefreshToken.ifBlank { twitchDeviceAccessToken }
+        val clientId = uiState.twitchDeviceClientId.trim()
+        twitchDeviceAccessToken = ""
+        twitchDeviceRefreshToken = ""
+        twitchDeviceAccessTokenExpiresAtMs = 0L
+        secretStore.remove(PREF_TWITCH_DEVICE_REFRESH_TOKEN)
+        if (tokenToRevoke.isNotBlank() && clientId.isNotBlank()) {
+            lifecycleScope.launch { runCatching { twitchDeviceAuthApi.revoke(clientId, tokenToRevoke) } }
+        }
+        preferences.edit()
+            .remove(PREF_TWITCH_USER_ID)
+            .remove(PREF_TWITCH_USER_LOGIN)
+            .remove(PREF_TWITCH_CHANNEL_TITLE)
+            .apply()
+        uiState = uiState.copy(
+            twitchConnected = false,
+            twitchAccount = "",
+            twitchUserId = "",
+            twitchUserLogin = "",
+            twitchChannelTitle = "",
+            twitchDeviceAuthPending = false,
+            twitchDeviceUserCode = "",
+            twitchDeviceVerificationUrl = "",
+            twitchChatMessages = emptyList(),
+            twitchChatStatus = "",
+            twitchStatus = "Twitch disconnected",
+            error = ""
+        )
+    }
+
+    private fun refreshTwitchChannel() {
+        requireTwitchToken { token -> refreshTwitchChannel(token) }
+    }
+
+    private fun refreshTwitchChannel(token: String) {
+        val clientId = uiState.twitchDeviceClientId.trim()
+        if (clientId.isBlank()) {
+            setError("Paste your Twitch OAuth client ID first", null)
+            return
+        }
+        lifecycleScope.launch {
+            runCatching {
+                uiState = uiState.copy(twitchStatus = "Checking OAuth Twitch channel...")
+                val user = twitchApi.getMe(token, clientId)
+                val channel = twitchApi.getChannel(token, clientId, user.id)
+                user to channel
+            }.onSuccess { (user, channel) ->
+                preferences.edit()
+                    .putString(PREF_TWITCH_USER_ID, user.id)
+                    .putString(PREF_TWITCH_USER_LOGIN, user.login)
+                    .putString(PREF_TWITCH_CHANNEL_TITLE, channel.title)
+                    .apply()
+                uiState = uiState.copy(
+                    twitchConnected = true,
+                    twitchUserId = user.id,
+                    twitchUserLogin = user.login,
+                    twitchAccount = user.summary,
+                    twitchChannelTitle = channel.title.ifBlank { user.summary },
+                    twitchTitle = uiState.twitchTitle.ifBlank { channel.title.ifBlank { defaultTwitchTitle() } },
+                    twitchCategoryId = channel.categoryId.ifBlank { uiState.twitchCategoryId },
+                    twitchStatus = "OAuth channel: ${user.summary}",
+                    lastStatus = "OAuth Twitch channel: ${user.summary}",
+                    error = ""
+                )
+                startTwitchChatIfPossible()
+            }.onFailure { throwable ->
+                if ((throwable as? TwitchApiException)?.statusCode == 401) {
+                    twitchDeviceAccessToken = ""
+                }
+                setError("Check Twitch channel failed", throwable)
             }
         }
     }
@@ -996,7 +1330,53 @@ class MainActivity : ComponentActivity() {
         )
     }
 
+    private fun requireTwitchToken(onToken: (String) -> Unit) {
+        val now = System.currentTimeMillis()
+        if (twitchDeviceAccessToken.isNotBlank() && now < twitchDeviceAccessTokenExpiresAtMs - 60_000L) {
+            onToken(twitchDeviceAccessToken)
+            return
+        }
+
+        val refreshToken = twitchDeviceRefreshToken
+            .ifBlank { secretStore.getString(PREF_TWITCH_DEVICE_REFRESH_TOKEN) }
+        if (refreshToken.isBlank()) {
+            setError("Connect Twitch with OAuth first", null)
+            return
+        }
+        val clientId = uiState.twitchDeviceClientId.trim()
+        if (clientId.isBlank()) {
+            setError("Paste your Twitch OAuth client ID to refresh auth", null)
+            return
+        }
+        lifecycleScope.launch {
+            runCatching {
+                uiState = uiState.copy(twitchStatus = "Refreshing Twitch device auth...")
+                twitchDeviceAuthApi.refreshAccessToken(clientId, refreshToken)
+            }.onSuccess { tokens ->
+                storeTwitchDeviceTokens(tokens)
+                onToken(tokens.accessToken)
+            }.onFailure { throwable ->
+                setError("Refresh Twitch device auth failed", throwable)
+            }
+        }
+    }
+
+    private fun storeTwitchDeviceTokens(tokens: TwitchDeviceTokens) {
+        twitchDeviceAccessToken = tokens.accessToken
+        twitchDeviceRefreshToken = tokens.refreshToken
+        twitchDeviceAccessTokenExpiresAtMs = System.currentTimeMillis() + tokens.expiresInSeconds * 1000L
+        if (tokens.refreshToken.isNotBlank()) {
+            secretStore.putString(PREF_TWITCH_DEVICE_REFRESH_TOKEN, tokens.refreshToken)
+        }
+        uiState = uiState.copy(
+            twitchConnected = true,
+            twitchAccount = "device linked",
+            error = ""
+        )
+    }
+
     private fun startYoutubeLive() {
+        if (uiState.twitchLive) stopTwitchLive()
         youtubeCompleteJob?.cancel()
         val streamKey = uiState.youtubeStreamKey.trim()
         if (streamKey.isBlank()) {
@@ -1027,6 +1407,96 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    private fun startTwitchLive() {
+        if (uiState.youtubeLive) stopYoutubeLive()
+        val clientId = uiState.twitchDeviceClientId.trim()
+        if (uiState.twitchConnected) {
+            if (clientId.isBlank()) {
+                setError("Paste your Twitch OAuth client ID first", null)
+                return
+            }
+            requireTwitchToken { token ->
+                lifecycleScope.launch {
+                    runCatching {
+                        prepareTwitchOauthStream(token, clientId)
+                    }.onSuccess { streamKey ->
+                        startTwitchPublisher(streamKey)
+                    }.onFailure { throwable ->
+                        if ((throwable as? TwitchApiException)?.statusCode == 401) {
+                            twitchDeviceAccessToken = ""
+                        }
+                        setError("Prepare Twitch live failed", throwable)
+                    }
+                }
+            }
+        } else {
+            val streamKey = uiState.twitchStreamKey.trim()
+            if (streamKey.isBlank()) {
+                setError("Paste your Twitch stream key or connect OAuth first", null)
+                return
+            }
+            startTwitchPublisher(streamKey)
+        }
+    }
+
+    private suspend fun prepareTwitchOauthStream(accessToken: String, clientId: String): String {
+        uiState = uiState.copy(twitchStatus = "Preparing Twitch channel...")
+        val user = twitchApi.getMe(accessToken, clientId)
+        val title = uiState.twitchTitle.trim().ifBlank { defaultTwitchTitle() }
+        val category = TwitchCategory.fromId(uiState.twitchCategoryId)
+        twitchApi.updateChannel(
+            accessToken = accessToken,
+            clientId = clientId,
+            broadcasterId = user.id,
+            title = title,
+            category = category
+        )
+        val streamKey = twitchApi.getStreamKey(accessToken, clientId, user.id)
+        secretStore.putString(PREF_TWITCH_STREAM_KEY, streamKey)
+        preferences.edit()
+            .putString(PREF_TWITCH_USER_ID, user.id)
+            .putString(PREF_TWITCH_USER_LOGIN, user.login)
+            .putString(PREF_TWITCH_TITLE, title)
+            .apply()
+        uiState = uiState.copy(
+            twitchStreamKey = streamKey,
+            twitchTitle = title,
+            twitchConnected = true,
+            twitchUserId = user.id,
+            twitchUserLogin = user.login,
+            twitchAccount = user.summary,
+            twitchStatus = "Twitch channel updated: $title",
+            error = ""
+        )
+        startTwitchChatIfPossible()
+        return streamKey
+    }
+
+    private fun startTwitchPublisher(streamKey: String) {
+        applySelectedPreset()
+        val willTranscode = uiState.previewRotationDegrees.normalizedRotation() != 0 || YOUTUBE_FIX_HORIZONTAL_MIRROR
+        if (willTranscode) {
+            twitchPublisher.clearVideoState()
+        }
+        twitchPublisher.start(
+            streamKey = streamKey,
+            preset = uiState.selectedPreset,
+            serverUrl = uiState.twitchIngestServerUrl.ifBlank { TwitchApi.DEFAULT_INGEST_SERVER }
+        )
+        if (willTranscode) {
+            startOrUpdateTwitchVideoPipeline()
+        } else {
+            twitchVideoTranscoder?.stop()
+            twitchVideoTranscoder = null
+            lastVideoConfig?.let { twitchPublisher.configureVideo(it) }
+        }
+        if (uiState.streaming || uiState.reverseRunning || uiState.receiverRunning) {
+            cxr.requestKeyFrame()
+        } else {
+            startP2pStream()
+        }
+    }
+
     private fun stopYoutubeLive() {
         val broadcastId = uiState.youtubeBroadcastId
         youtubeGoLiveJob?.cancel()
@@ -1043,6 +1513,15 @@ class MainActivity : ComponentActivity() {
             youtubeIngestionAddress = ""
         )
         completeYoutubeBroadcastAfterStop(broadcastId)
+    }
+
+    private fun stopTwitchLive() {
+        stopTwitchChat(clearHelper = true)
+        twitchVideoTranscoder?.stop()
+        twitchVideoTranscoder = null
+        twitchPublisher.stop()
+        stopCameraTransport()
+        uiState = uiState.copy(twitchLive = false)
     }
 
     private fun startYoutubeBroadcastWhenRtmpReady() {
@@ -1229,6 +1708,96 @@ class MainActivity : ComponentActivity() {
         )
     }
 
+    private fun startTwitchChatIfPossible() {
+        if (!uiState.twitchChatEnabled) return
+        sendTwitchChatStyle()
+        if (!uiState.twitchConnected) {
+            uiState = uiState.copy(twitchChatStatus = "Connect Twitch to show chat in the helper")
+            return
+        }
+        if (twitchChatClient != null) return
+        val clientId = uiState.twitchDeviceClientId.trim()
+        val userId = uiState.twitchUserId.trim()
+        if (clientId.isBlank() || userId.isBlank()) {
+            uiState = uiState.copy(twitchChatStatus = "Refresh Twitch channel before chat")
+            return
+        }
+        twitchChatStopRequested = false
+        requireTwitchToken { token ->
+            if (!uiState.twitchChatEnabled || twitchChatClient != null) return@requireTwitchToken
+            val recentMessages = ArrayDeque<ChatOverlayMessage>()
+            val seenIds = linkedMapOf<String, Long>()
+            twitchChatClient = TwitchChatClient(
+                api = twitchApi,
+                accessToken = token,
+                clientId = clientId,
+                broadcasterId = userId,
+                userId = userId,
+                onStatus = { status ->
+                    onMain { uiState = uiState.copy(twitchChatStatus = status, lastStatus = status) }
+                },
+                onMessages = { messages ->
+                    onMain {
+                        val nowMs = System.currentTimeMillis()
+                        val seenIterator = seenIds.entries.iterator()
+                        while (seenIterator.hasNext()) {
+                            if (nowMs - seenIterator.next().value > YOUTUBE_CHAT_SEEN_ID_TTL_MS) {
+                                seenIterator.remove()
+                            }
+                        }
+                        messages.forEach { message ->
+                            if (message.id.isNotBlank() && seenIds.containsKey(message.id)) return@forEach
+                            if (message.id.isNotBlank()) seenIds[message.id] = nowMs
+                            recentMessages.addLast(
+                                ChatOverlayMessage(
+                                    author = message.author,
+                                    text = message.text,
+                                    timestampMs = nowMs
+                                )
+                            )
+                            val currentMaxMessages = uiState.twitchChatMaxMessages.coerceIn(0, Protocol.MAX_CHAT_MESSAGE_COUNT)
+                            while (recentMessages.size > currentMaxMessages) {
+                                recentMessages.removeFirst()
+                            }
+                        }
+                        val overlayMessages = recentMessages.toList()
+                            .takeLast(uiState.twitchChatMaxMessages.coerceIn(0, Protocol.MAX_CHAT_MESSAGE_COUNT))
+                        uiState = uiState.copy(
+                            twitchChatMessages = overlayMessages,
+                            twitchChatStatus = "Showing ${overlayMessages.size} chat messages on helper"
+                        )
+                        cxr.sendChatMessages(overlayMessages)
+                    }
+                },
+                onError = { message, throwable ->
+                    onMain {
+                        if (twitchChatStopRequested || throwable?.isCancellationLike() == true) {
+                            uiState = uiState.copy(twitchChatStatus = "Chat stopped")
+                        } else {
+                            setError(message, throwable)
+                            uiState = uiState.copy(twitchChatStatus = "Chat unavailable")
+                        }
+                    }
+                }
+            ).also { it.start() }
+        }
+    }
+
+    private fun stopTwitchChat(clearHelper: Boolean) {
+        twitchChatStopRequested = true
+        twitchChatClient?.stop()
+        twitchChatClient = null
+        if (clearHelper) {
+            runCatching { cxr.sendChatMessages(emptyList()) }
+        }
+        val nextError = if (uiState.error.startsWith("Twitch chat failed")) "" else uiState.error
+        uiState = uiState.copy(
+            twitchChatMessages = emptyList(),
+            twitchChatStatus = if (uiState.twitchChatEnabled) "Chat stopped" else uiState.twitchChatStatus,
+            error = nextError
+        )
+    }
+
     private fun isCurrentYoutubeLiveTarget(broadcastId: String, streamId: String): Boolean =
         uiState.youtubeLive &&
             uiState.youtubeBroadcastId == broadcastId &&
@@ -1252,6 +1821,7 @@ class MainActivity : ComponentActivity() {
         val defaultOutputBitrate = preset.youtubeVideoBitrate.takeIf { it > 0 } ?: preset.videoBitrate
         val outputBitrate = uiState.youtubeVideoBitrateOverride.takeIf { it > 0 } ?: defaultOutputBitrate
         val transcoder = YoutubeVideoRotationTranscoder(
+            platformName = "YouTube",
             inputWidth = preset.width,
             inputHeight = preset.height,
             outputWidth = outputWidth,
@@ -1273,7 +1843,50 @@ class MainActivity : ComponentActivity() {
         lastVideoConfig?.let { transcoder.configure(it) }
     }
 
+    private fun startOrUpdateTwitchVideoPipeline() {
+        twitchVideoTranscoder?.stop()
+        twitchVideoTranscoder = null
+        val previewRotation = uiState.previewRotationDegrees.normalizedRotation()
+        val streamRotation = previewRotation.inverseRotation()
+        if (previewRotation == 0 && !YOUTUBE_FIX_HORIZONTAL_MIRROR) {
+            lastVideoConfig?.let { twitchPublisher.configureVideo(it) }
+            uiState = uiState.copy(twitchStatus = "Twitch pass-through video")
+            return
+        }
+        val preset = uiState.selectedPreset
+        val naturalOutputWidth = if (streamRotation.isQuarterTurn()) preset.height else preset.width
+        val naturalOutputHeight = if (streamRotation.isQuarterTurn()) preset.width else preset.height
+        val outputWidth = preset.youtubeOutputWidth.takeIf { it > 0 } ?: naturalOutputWidth
+        val outputHeight = preset.youtubeOutputHeight.takeIf { it > 0 } ?: naturalOutputHeight
+        val defaultOutputBitrate = preset.youtubeVideoBitrate.takeIf { it > 0 } ?: preset.videoBitrate
+        val outputBitrate = uiState.twitchVideoBitrateOverride.takeIf { it > 0 } ?: defaultOutputBitrate
+        val transcoder = YoutubeVideoRotationTranscoder(
+            platformName = "Twitch",
+            inputWidth = preset.width,
+            inputHeight = preset.height,
+            outputWidth = outputWidth,
+            outputHeight = outputHeight,
+            fps = preset.fps,
+            bitrate = outputBitrate,
+            iframeIntervalSeconds = preset.iframeIntervalSeconds,
+            rotationDegrees = streamRotation,
+            mirrorHorizontally = YOUTUBE_FIX_HORIZONTAL_MIRROR,
+            onConfig = { payload -> twitchPublisher.configureVideo(payload) },
+            onFrame = { payload, timestampUs, keyFrame -> twitchPublisher.publishVideoFrame(payload, timestampUs, keyFrame) },
+            onStatus = { status -> onMain { uiState = uiState.copy(twitchStatus = status, lastStatus = status) } },
+            onError = { message, throwable -> onMain { setError(message, throwable) } },
+            onInputBackpressure = { onMain { cxr.requestKeyFrame() } }
+        )
+        twitchVideoTranscoder = transcoder
+        twitchPublisher.clearVideoState()
+        transcoder.start()
+        lastVideoConfig?.let { transcoder.configure(it) }
+    }
+
     private fun defaultYoutubeTitle(): String =
+        "Rokid POV ${java.time.LocalDateTime.now().toString().take(16).replace('T', ' ')}"
+
+    private fun defaultTwitchTitle(): String =
         "Rokid POV ${java.time.LocalDateTime.now().toString().take(16).replace('T', ' ')}"
 
     private fun onMain(block: () -> Unit) {
@@ -1354,6 +1967,19 @@ class MainActivity : ComponentActivity() {
         private const val PREF_YOUTUBE_CHAT_ENABLED = "youtube_chat_enabled"
         private const val PREF_YOUTUBE_CHAT_FONT_SIZE_SP = "youtube_chat_font_size_sp"
         private const val PREF_YOUTUBE_CHAT_MAX_MESSAGES = "youtube_chat_max_messages"
+        private const val PREF_TWITCH_STREAM_KEY = "twitch_stream_key"
+        private const val PREF_TWITCH_TITLE = "twitch_title"
+        private const val PREF_TWITCH_CATEGORY_ID = "twitch_category_id"
+        private const val PREF_TWITCH_DEVICE_CLIENT_ID = "twitch_device_client_id"
+        private const val PREF_TWITCH_DEVICE_REFRESH_TOKEN = "twitch_device_refresh_token"
+        private const val PREF_TWITCH_USER_ID = "twitch_user_id"
+        private const val PREF_TWITCH_USER_LOGIN = "twitch_user_login"
+        private const val PREF_TWITCH_CHANNEL_TITLE = "twitch_channel_title"
+        private const val PREF_TWITCH_INGEST_SERVER_URL = "twitch_ingest_server_url"
+        private const val PREF_TWITCH_VIDEO_BITRATE = "twitch_video_bitrate"
+        private const val PREF_TWITCH_CHAT_ENABLED = "twitch_chat_enabled"
+        private const val PREF_TWITCH_CHAT_FONT_SIZE_SP = "twitch_chat_font_size_sp"
+        private const val PREF_TWITCH_CHAT_MAX_MESSAGES = "twitch_chat_max_messages"
         private const val YOUTUBE_FIX_HORIZONTAL_MIRROR = true
         private const val YOUTUBE_INGEST_POLL_ATTEMPTS = 24
         private const val YOUTUBE_INGEST_POLL_DELAY_MS = 2_500L
@@ -1460,6 +2086,20 @@ private fun PhoneScreen(
     onDisconnectYoutube: () -> Unit,
     onRefreshYoutubeChannel: () -> Unit,
     onCreateYoutubeLive: () -> Unit,
+    onTwitchKeyChanged: (String) -> Unit,
+    onTwitchTitleChanged: (String) -> Unit,
+    onTwitchDeviceClientIdChanged: (String) -> Unit,
+    onTwitchCategorySelected: (TwitchCategory) -> Unit,
+    onTwitchBitrateSelected: (Int) -> Unit,
+    onTwitchChatEnabledChange: (Boolean) -> Unit,
+    onTwitchChatFontSizeSelected: (Int) -> Unit,
+    onTwitchChatMaxMessagesSelected: (Int) -> Unit,
+    onStartTwitchDeviceAuth: () -> Unit,
+    onOpenTwitchDocs: () -> Unit,
+    onDisconnectTwitch: () -> Unit,
+    onRefreshTwitchChannel: () -> Unit,
+    onStartTwitch: () -> Unit,
+    onStopTwitch: () -> Unit,
     onPresetSelected: (VideoPreset) -> Unit,
     onPreviewRotationSelected: (Int) -> Unit,
     onStartYoutube: () -> Unit,
@@ -1535,7 +2175,30 @@ private fun PhoneScreen(
                     onStopYoutube = onStopYoutube
                 )
 
-                StudioTab.TWITCH,
+                StudioTab.TWITCH -> TwitchStudioScreen(
+                    state = state,
+                    showPreview = showPreview,
+                    onShowPreviewChange = { showPreview = it },
+                    onSurfaceReady = onSurfaceReady,
+                    onSurfaceGone = onSurfaceGone,
+                    onBack = { selectedTab = StudioTab.HOME },
+                    onTwitchKeyChanged = onTwitchKeyChanged,
+                    onTwitchTitleChanged = onTwitchTitleChanged,
+                    onTwitchDeviceClientIdChanged = onTwitchDeviceClientIdChanged,
+                    onTwitchCategorySelected = onTwitchCategorySelected,
+                    onTwitchBitrateSelected = onTwitchBitrateSelected,
+                    onTwitchChatEnabledChange = onTwitchChatEnabledChange,
+                    onTwitchChatFontSizeSelected = onTwitchChatFontSizeSelected,
+                    onTwitchChatMaxMessagesSelected = onTwitchChatMaxMessagesSelected,
+                    onStartTwitchDeviceAuth = onStartTwitchDeviceAuth,
+                    onOpenTwitchDocs = onOpenTwitchDocs,
+                    onDisconnectTwitch = onDisconnectTwitch,
+                    onRefreshTwitchChannel = onRefreshTwitchChannel,
+                    onPresetSelected = onPresetSelected,
+                    onPreviewRotationSelected = onPreviewRotationSelected,
+                    onStartTwitch = onStartTwitch,
+                    onStopTwitch = onStopTwitch
+                )
                 StudioTab.HISTORY -> PlaceholderStudioScreen(
                     tab = selectedTab,
                     onOpenYoutube = { selectedTab = StudioTab.YOUTUBE },
@@ -1543,7 +2206,7 @@ private fun PhoneScreen(
                 )
             }
 
-            if (selectedTab != StudioTab.YOUTUBE) {
+            if (selectedTab != StudioTab.YOUTUBE && selectedTab != StudioTab.TWITCH) {
                 BottomStudioNav(
                     selectedTab = selectedTab,
                     onSelectTab = { selectedTab = it },
@@ -2104,6 +2767,288 @@ private fun YoutubeStudioScreen(
 }
 
 @Composable
+private fun TwitchStudioScreen(
+    state: PhoneUiState,
+    showPreview: Boolean,
+    onShowPreviewChange: (Boolean) -> Unit,
+    onSurfaceReady: (AndroidSurface) -> Unit,
+    onSurfaceGone: () -> Unit,
+    onBack: () -> Unit,
+    onTwitchKeyChanged: (String) -> Unit,
+    onTwitchTitleChanged: (String) -> Unit,
+    onTwitchDeviceClientIdChanged: (String) -> Unit,
+    onTwitchCategorySelected: (TwitchCategory) -> Unit,
+    onTwitchBitrateSelected: (Int) -> Unit,
+    onTwitchChatEnabledChange: (Boolean) -> Unit,
+    onTwitchChatFontSizeSelected: (Int) -> Unit,
+    onTwitchChatMaxMessagesSelected: (Int) -> Unit,
+    onStartTwitchDeviceAuth: () -> Unit,
+    onOpenTwitchDocs: () -> Unit,
+    onDisconnectTwitch: () -> Unit,
+    onRefreshTwitchChannel: () -> Unit,
+    onPresetSelected: (VideoPreset) -> Unit,
+    onPreviewRotationSelected: (Int) -> Unit,
+    onStartTwitch: () -> Unit,
+    onStopTwitch: () -> Unit
+) {
+    var showKey by remember { mutableStateOf(false) }
+    var advancedOpen by remember { mutableStateOf(false) }
+    var showTwitchHelp by remember { mutableStateOf(false) }
+    var selectedTwitchMode by remember {
+        mutableStateOf(
+            if (state.twitchConnected) YoutubeConnectionMode.OAUTH else YoutubeConnectionMode.STREAM_KEY
+        )
+    }
+    val clipboard = LocalClipboardManager.current
+    val oauthMode = selectedTwitchMode == YoutubeConnectionMode.OAUTH
+    val streamKeyMode = selectedTwitchMode == YoutubeConnectionMode.STREAM_KEY
+    val canUsePrimaryButton = state.twitchLive ||
+        if (oauthMode) state.twitchConnected else state.twitchStreamKey.isNotBlank()
+    val primaryText = when {
+        state.twitchLive -> "End Twitch Stream"
+        oauthMode && state.twitchConnected -> "Update channel and start stream"
+        oauthMode -> "Connect Twitch account first"
+        else -> "Start stream with key"
+    }
+
+    LaunchedEffect(state.twitchConnected) {
+        if (state.twitchConnected) {
+            selectedTwitchMode = YoutubeConnectionMode.OAUTH
+        }
+    }
+
+    BackHandler(enabled = showTwitchHelp) {
+        showTwitchHelp = false
+    }
+
+    Box(modifier = Modifier.fillMaxSize()) {
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .verticalScroll(rememberScrollState())
+                .padding(bottom = 112.dp)
+        ) {
+            TwitchTopBar(onBack = onBack)
+
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(start = 14.dp, top = 12.dp, end = 14.dp, bottom = 20.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                TwitchModeSelector(
+                    selected = selectedTwitchMode,
+                    enabled = !state.twitchLive,
+                    onSelected = { selectedTwitchMode = it },
+                    onHelp = { showTwitchHelp = true }
+                )
+
+                StudioTextInputCard(
+                    icon = StudioIcon.GLASSES,
+                    label = "Stream Title",
+                    value = if (oauthMode) state.twitchTitle else "",
+                    onValueChange = onTwitchTitleChanged,
+                    placeholder = if (oauthMode) "Rokid Live - AR Adventures" else "Set in Twitch Creator Dashboard with stream key mode",
+                    enabled = oauthMode && !state.twitchLive,
+                    helperText = if (oauthMode) {
+                        "OAuth mode updates the Twitch channel title before streaming."
+                    } else {
+                        "Stream key mode only sends video and audio. Title and category stay in Twitch."
+                    },
+                    trailing = {
+                        Text(
+                            if (oauthMode) "${state.twitchTitle.length}/140" else "Dashboard",
+                            color = StudioMuted,
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.Medium
+                        )
+                    }
+                )
+
+                StudioTextInputCard(
+                    icon = StudioIcon.KEY,
+                    label = "Stream Key",
+                    value = state.twitchStreamKey,
+                    onValueChange = onTwitchKeyChanged,
+                    placeholder = if (streamKeyMode) "Paste Twitch stream key" else "Fetched automatically by OAuth",
+                    password = !showKey,
+                    enabled = streamKeyMode && !state.twitchLive,
+                    helperText = if (streamKeyMode) {
+                        "No OAuth needed. Paste the key from Twitch Creator Dashboard."
+                    } else {
+                        "OAuth mode retrieves the Twitch stream key automatically."
+                    },
+                    trailing = {
+                        Row(
+                            horizontalArrangement = Arrangement.spacedBy(12.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                if (showKey) "Hide" else "Show",
+                                color = StudioGreen,
+                                fontSize = 14.sp,
+                                fontWeight = FontWeight.Bold,
+                                modifier = Modifier.clickable { showKey = !showKey }
+                            )
+                            IconGlyph(
+                                StudioIcon.COPY,
+                                StudioMuted,
+                                Modifier
+                                    .size(24.dp)
+                                    .clickable {
+                                        if (state.twitchStreamKey.isNotBlank()) {
+                                            clipboard.setText(AnnotatedString(state.twitchStreamKey))
+                                        }
+                                    }
+                            )
+                        }
+                    }
+                )
+
+                StudioSelectCard(
+                    label = "Resolution",
+                    value = state.selectedPreset.youtubeResolutionLabel(state.previewRotationDegrees),
+                    icon = StudioIcon.VIDEO,
+                    enabled = !state.twitchLive,
+                    options = VideoPreset.Visible,
+                    selected = state.selectedPreset,
+                    onSelected = onPresetSelected
+                )
+
+                PlatformBitrateCard(
+                    platformName = "Twitch",
+                    selectedBitrate = state.twitchVideoBitrateOverride,
+                    autoBitrate = state.selectedPreset.defaultYoutubeBitrate(),
+                    enabled = !state.twitchLive,
+                    onSelected = onTwitchBitrateSelected
+                )
+
+                PreviewHudCard(
+                    state = state,
+                    showPreview = showPreview,
+                    previewActionLabel = "Hide Preview",
+                    onShowPreviewChange = onShowPreviewChange,
+                    onSurfaceReady = onSurfaceReady,
+                    onSurfaceGone = onSurfaceGone
+                )
+
+                TwitchLoginCard(
+                    state = state,
+                    onShowHelp = { showTwitchHelp = true },
+                    onStartTwitchDeviceAuth = onStartTwitchDeviceAuth,
+                    onRefreshTwitchChannel = onRefreshTwitchChannel,
+                    onDisconnectTwitch = onDisconnectTwitch,
+                    visible = oauthMode
+                )
+
+                if (streamKeyMode) {
+                    TwitchModeHintCard(onShowHelp = { showTwitchHelp = true })
+                }
+
+                ErrorBanner(state.error)
+
+                RotationSelector(
+                    selectedRotation = state.previewRotationDegrees,
+                    enabled = !state.twitchLive,
+                    onSelected = onPreviewRotationSelected
+                )
+
+                DisabledSettingCard(
+                    label = "Visibility",
+                    value = "Public",
+                    reason = "Twitch goes public when the RTMP stream starts. Use YouTube for private or unlisted lives."
+                )
+
+                TwitchCategoryCard(
+                    selected = TwitchCategory.fromId(state.twitchCategoryId),
+                    enabled = oauthMode && !state.twitchLive,
+                    oauthMode = oauthMode,
+                    onSelected = onTwitchCategorySelected
+                )
+
+                if (!oauthMode) {
+                    SmallInfoText("Title and category are controlled in Twitch Creator Dashboard when using a stream key.")
+                }
+
+                if (oauthMode) {
+                    TextButton(
+                        modifier = Modifier.fillMaxWidth(),
+                        onClick = { advancedOpen = !advancedOpen }
+                    ) {
+                        Text(
+                            if (advancedOpen) "Hide OAuth setup" else "Advanced OAuth setup",
+                            color = StudioGreen,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+
+                    if (advancedOpen) {
+                        AdvancedTwitchSetup(
+                            state = state,
+                            enabled = !state.twitchLive,
+                            onTwitchDeviceClientIdChanged = onTwitchDeviceClientIdChanged,
+                            onOpenTwitchDocs = onOpenTwitchDocs
+                        )
+                    }
+                }
+
+                TwitchChatCard(
+                    state = state,
+                    oauthMode = oauthMode,
+                    onEnabledChange = onTwitchChatEnabledChange,
+                    onFontSizeSelected = onTwitchChatFontSizeSelected,
+                    onMaxMessagesSelected = onTwitchChatMaxMessagesSelected
+                )
+            }
+        }
+
+        Box(
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .fillMaxWidth()
+                .height(118.dp)
+                .background(Brush.verticalGradient(listOf(Color.Transparent, StudioBgBottom, StudioBgBottom)))
+        )
+
+        StudioPrimaryButton(
+            text = primaryText,
+            icon = if (state.twitchLive) StudioIcon.STOP else StudioIcon.BROADCAST,
+            enabled = canUsePrimaryButton,
+            onClick = {
+                if (state.twitchLive) {
+                    onStopTwitch()
+                } else {
+                    onStartTwitch()
+                }
+            },
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .padding(start = 14.dp, end = 14.dp, bottom = 18.dp)
+        )
+
+        if (showTwitchHelp) {
+            TwitchModeHelpDialog(
+                onDismiss = { showTwitchHelp = false },
+                onUseStreamKey = {
+                    selectedTwitchMode = YoutubeConnectionMode.STREAM_KEY
+                    showTwitchHelp = false
+                },
+                onUseOAuth = {
+                    selectedTwitchMode = YoutubeConnectionMode.OAUTH
+                    showTwitchHelp = false
+                },
+                onStartDeviceAuth = {
+                    selectedTwitchMode = YoutubeConnectionMode.OAUTH
+                    showTwitchHelp = false
+                    onStartTwitchDeviceAuth()
+                },
+                onOpenTwitchDocs = onOpenTwitchDocs
+            )
+        }
+    }
+}
+
+@Composable
 private fun PlaceholderStudioScreen(
     tab: StudioTab,
     onOpenYoutube: () -> Unit,
@@ -2211,6 +3156,55 @@ private fun YoutubeTopBar(
                 .fillMaxWidth()
                 .height(3.dp)
                 .background(StudioRed)
+        )
+    }
+}
+
+@Composable
+private fun TwitchTopBar(
+    onBack: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Column(
+        modifier = modifier
+            .fillMaxWidth()
+            .background(StudioBgTop),
+        verticalArrangement = Arrangement.spacedBy(10.dp)
+    ) {
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(62.dp)
+        ) {
+            Box(
+                modifier = Modifier
+                    .align(Alignment.CenterStart)
+                    .padding(start = 8.dp)
+                    .size(52.dp)
+                    .clip(CircleShape)
+                    .clickable(onClick = onBack),
+                contentAlignment = Alignment.Center
+            ) {
+                Image(
+                    painter = painterResource(R.drawable.ic_ui_arrow_back),
+                    contentDescription = "Back",
+                    modifier = Modifier.size(31.dp)
+                )
+            }
+            Row(
+                modifier = Modifier.align(Alignment.Center),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                TwitchBadge(Modifier.size(width = 34.dp, height = 34.dp))
+                Text("Twitch", color = StudioText, fontSize = 27.sp, fontWeight = FontWeight.Light)
+            }
+        }
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(3.dp)
+                .background(StudioPurple)
         )
     }
 }
@@ -2532,6 +3526,52 @@ private fun YoutubeModeSelector(
 }
 
 @Composable
+private fun TwitchModeSelector(
+    selected: YoutubeConnectionMode,
+    enabled: Boolean,
+    onSelected: (YoutubeConnectionMode) -> Unit,
+    onHelp: () -> Unit
+) {
+    StudioCard(enabled = enabled) {
+        Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(verticalArrangement = Arrangement.spacedBy(3.dp), modifier = Modifier.weight(1f)) {
+                    Text("Twitch setup", color = StudioText, fontSize = 16.sp, fontWeight = FontWeight.Bold)
+                    Text(
+                        "Choose whether the app only publishes RTMP or also manages your channel.",
+                        color = StudioMuted,
+                        fontSize = 12.sp
+                    )
+                }
+                CompactTextAction("Explain", onHelp)
+            }
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                YoutubeModePill(
+                    modifier = Modifier.weight(1f),
+                    title = "Stream key",
+                    subtitle = "RTMP only",
+                    active = selected == YoutubeConnectionMode.STREAM_KEY,
+                    enabled = enabled,
+                    onClick = { onSelected(YoutubeConnectionMode.STREAM_KEY) }
+                )
+                YoutubeModePill(
+                    modifier = Modifier.weight(1f),
+                    title = "OAuth",
+                    subtitle = "Key + chat",
+                    active = selected == YoutubeConnectionMode.OAUTH,
+                    enabled = enabled,
+                    onClick = { onSelected(YoutubeConnectionMode.OAUTH) }
+                )
+            }
+        }
+    }
+}
+
+@Composable
 private fun YoutubeModePill(
     title: String,
     subtitle: String,
@@ -2578,6 +3618,27 @@ private fun YoutubeModeHintCard(onShowHelp: () -> Unit) {
                     Text("Stream key mode", color = StudioText, fontSize = 16.sp, fontWeight = FontWeight.Bold)
                     Text(
                         "The phone sends the Rokid video/audio to an existing YouTube live. YouTube Studio keeps control of title, privacy, category and thumbnail.",
+                        color = StudioMuted,
+                        fontSize = 12.sp,
+                        lineHeight = 16.sp
+                    )
+                }
+            }
+            CompactTextAction("Compare with OAuth", onShowHelp)
+        }
+    }
+}
+
+@Composable
+private fun TwitchModeHintCard(onShowHelp: () -> Unit) {
+    StudioCard {
+        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Row(horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.CenterVertically) {
+                TwitchBadge(Modifier.size(width = 32.dp, height = 32.dp))
+                Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                    Text("Stream key mode", color = StudioText, fontSize = 16.sp, fontWeight = FontWeight.Bold)
+                    Text(
+                        "The phone sends the Rokid video/audio to Twitch. Creator Dashboard keeps control of title and category.",
                         color = StudioMuted,
                         fontSize = 12.sp,
                         lineHeight = 16.sp
@@ -2727,6 +3788,21 @@ private fun YoutubeBitrateCard(
     autoBitrate: Int,
     enabled: Boolean,
     onSelected: (Int) -> Unit
+) = PlatformBitrateCard(
+    platformName = "YouTube",
+    selectedBitrate = selectedBitrate,
+    autoBitrate = autoBitrate,
+    enabled = enabled,
+    onSelected = onSelected
+)
+
+@Composable
+private fun PlatformBitrateCard(
+    platformName: String,
+    selectedBitrate: Int,
+    autoBitrate: Int,
+    enabled: Boolean,
+    onSelected: (Int) -> Unit
 ) {
     var expanded by remember { mutableStateOf(false) }
     val value = if (selectedBitrate > 0) {
@@ -2752,11 +3828,11 @@ private fun YoutubeBitrateCard(
                         horizontalArrangement = Arrangement.SpaceBetween,
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Text("YouTube bitrate", color = if (enabled) StudioText else StudioMuted, fontSize = 16.sp, fontWeight = FontWeight.Bold)
+                        Text("$platformName bitrate", color = if (enabled) StudioText else StudioMuted, fontSize = 16.sp, fontWeight = FontWeight.Bold)
                         Text(value, color = if (enabled) StudioText else StudioMuted, fontSize = 15.sp, fontWeight = FontWeight.Medium)
                     }
                     Text(
-                        "Lower this if YouTube blocks while the phone preview stays clean.",
+                        "Lower this if $platformName blocks while the phone preview stays clean.",
                         color = StudioMuted,
                         fontSize = 11.sp,
                         lineHeight = 15.sp
@@ -2898,6 +3974,76 @@ private fun YoutubeCategoryCard(
 }
 
 @Composable
+private fun TwitchCategoryCard(
+    selected: TwitchCategory,
+    enabled: Boolean,
+    oauthMode: Boolean,
+    onSelected: (TwitchCategory) -> Unit
+) {
+    var expanded by remember { mutableStateOf(false) }
+    Box {
+        StudioCard(
+            modifier = Modifier.heightIn(min = 76.dp),
+            enabled = enabled,
+            onClick = { if (enabled) expanded = true }
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(14.dp)
+            ) {
+                IconGlyph(StudioIcon.TWITCH, if (enabled) StudioPurple else StudioMuted, Modifier.size(26.dp))
+                Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text("Category", color = if (enabled) StudioText else StudioMuted, fontSize = 16.sp, fontWeight = FontWeight.Bold)
+                        Text(
+                            if (oauthMode) selected.label else "Creator Dashboard",
+                            color = if (enabled) StudioText else StudioMuted,
+                            fontSize = 14.sp,
+                            textAlign = TextAlign.End,
+                            modifier = Modifier.weight(1f),
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                    Text(
+                        if (oauthMode) {
+                            "Applied to the channel before starting RTMP."
+                        } else {
+                            "Stream key mode keeps category in Twitch."
+                        },
+                        color = StudioMuted,
+                        fontSize = 11.sp,
+                        lineHeight = 15.sp
+                    )
+                }
+                IconGlyph(StudioIcon.CHEVRON, StudioMuted, Modifier.size(20.dp))
+            }
+        }
+        DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
+            TwitchCategory.Common.forEach { category ->
+                DropdownMenuItem(
+                    text = {
+                        Text(
+                            category.label,
+                            color = if (category.id == selected.id) StudioPurple else StudioText
+                        )
+                    },
+                    onClick = {
+                        expanded = false
+                        onSelected(category)
+                    }
+                )
+            }
+        }
+    }
+}
+
+@Composable
 private fun YoutubeChatCard(
     state: PhoneUiState,
     oauthMode: Boolean,
@@ -2983,6 +4129,107 @@ private fun YoutubeChatCard(
             if (state.youtubeChatMessages.isNotEmpty()) {
                 Column(verticalArrangement = Arrangement.spacedBy(5.dp)) {
                     state.youtubeChatMessages.takeLast(3).forEach { message ->
+                        Text(
+                            "${message.author}: ${message.text}",
+                            color = StudioText.copy(alpha = 0.9f),
+                            fontSize = 12.sp,
+                            lineHeight = 16.sp,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun TwitchChatCard(
+    state: PhoneUiState,
+    oauthMode: Boolean,
+    onEnabledChange: (Boolean) -> Unit,
+    onFontSizeSelected: (Int) -> Unit,
+    onMaxMessagesSelected: (Int) -> Unit
+) {
+    val enabled = oauthMode && state.twitchConnected
+    StudioCard(enabled = enabled) {
+        Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                IconGlyph(StudioIcon.TWITCH, if (enabled) StudioPurple else StudioMuted, Modifier.size(28.dp))
+                Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Text(
+                        "Chat on Helper",
+                        color = if (enabled) StudioText else StudioMuted,
+                        fontSize = 17.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Text(
+                        when {
+                            !oauthMode -> "OAuth mode is required to read Twitch chat."
+                            !state.twitchConnected -> "Connect Twitch to show chat in the glasses helper."
+                            state.twitchChatStatus.isNotBlank() -> state.twitchChatStatus
+                            state.twitchChatEnabled -> "Waiting for Twitch chat."
+                            else -> "Phone uses Twitch EventSub; helper only renders text."
+                        },
+                        color = StudioMuted,
+                        fontSize = 12.sp,
+                        lineHeight = 16.sp
+                    )
+                }
+                Switch(
+                    checked = state.twitchChatEnabled,
+                    onCheckedChange = onEnabledChange,
+                    enabled = enabled,
+                    colors = SwitchDefaults.colors(
+                        checkedThumbColor = Color.White,
+                        checkedTrackColor = StudioPurple,
+                        uncheckedThumbColor = StudioMuted,
+                        uncheckedTrackColor = Color(0xFF242A28),
+                        disabledCheckedThumbColor = StudioMuted,
+                        disabledCheckedTrackColor = Color(0xFF242A28),
+                        disabledUncheckedThumbColor = StudioMuted.copy(alpha = 0.7f),
+                        disabledUncheckedTrackColor = Color(0xFF1A1F1D)
+                    )
+                )
+            }
+
+            if (enabled) {
+                ChatFontStepperRow(
+                    selected = state.twitchChatFontSizeSp,
+                    enabled = enabled,
+                    onDecrease = {
+                        onFontSizeSelected(state.twitchChatFontSizeSp - 1)
+                    },
+                    onIncrease = {
+                        onFontSizeSelected(state.twitchChatFontSizeSp + 1)
+                    },
+                    onReset = {
+                        onFontSizeSelected(Protocol.DEFAULT_CHAT_FONT_SIZE_SP)
+                    }
+                )
+                ChatMessageStepperRow(
+                    selected = state.twitchChatMaxMessages,
+                    enabled = enabled,
+                    onDecrease = {
+                        onMaxMessagesSelected(state.twitchChatMaxMessages - 1)
+                    },
+                    onIncrease = {
+                        onMaxMessagesSelected(state.twitchChatMaxMessages + 1)
+                    },
+                    onReset = {
+                        onMaxMessagesSelected(Protocol.DEFAULT_CHAT_MAX_MESSAGES)
+                    }
+                )
+            }
+
+            if (state.twitchChatMessages.isNotEmpty()) {
+                Column(verticalArrangement = Arrangement.spacedBy(5.dp)) {
+                    state.twitchChatMessages.takeLast(3).forEach { message ->
                         Text(
                             "${message.author}: ${message.text}",
                             color = StudioText.copy(alpha = 0.9f),
@@ -3234,6 +4481,56 @@ private fun YoutubeLoginCard(
 }
 
 @Composable
+private fun TwitchLoginCard(
+    state: PhoneUiState,
+    onShowHelp: () -> Unit,
+    onStartTwitchDeviceAuth: () -> Unit,
+    onRefreshTwitchChannel: () -> Unit,
+    onDisconnectTwitch: () -> Unit,
+    visible: Boolean
+) {
+    if (!visible) return
+    StudioCard(onClick = onShowHelp) {
+        Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(16.dp)
+            ) {
+                TwitchBadge(Modifier.size(width = 38.dp, height = 38.dp))
+                Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Text(
+                        if (state.twitchConnected) "Twitch Connected" else "Login to Twitch",
+                        color = StudioText,
+                        fontSize = 19.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Text(
+                        when {
+                            state.twitchConnected -> state.twitchChannelTitle.ifBlank { state.twitchAccount.ifBlank { "Connected account" } }
+                            state.twitchDeviceUserCode.isNotBlank() -> "TV code copied: ${state.twitchDeviceUserCode}"
+                            else -> "Use device-code OAuth to fetch stream key and chat"
+                        },
+                        color = StudioMuted,
+                        fontSize = 13.sp,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+                IconGlyph(StudioIcon.CHEVRON, StudioMuted, Modifier.size(22.dp))
+            }
+            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                CompactTextAction("Generate code & open page", onStartTwitchDeviceAuth)
+                CompactTextAction("Refresh", onRefreshTwitchChannel)
+                if (state.twitchConnected) {
+                    CompactTextAction("Sign out", onDisconnectTwitch, enabled = !state.twitchLive)
+                }
+            }
+        }
+    }
+}
+
+@Composable
 private fun YoutubeModeHelpDialog(
     onDismiss: () -> Unit,
     onUseStreamKey: () -> Unit,
@@ -3308,6 +4605,84 @@ private fun YoutubeModeHelpDialog(
                     accent = StudioMuted
                 )
                 DialogActionButton("Open Google OAuth docs", primary = false, onClick = onOpenGoogleCloudDocs)
+            }
+        }
+    }
+}
+
+@Composable
+private fun TwitchModeHelpDialog(
+    onDismiss: () -> Unit,
+    onUseStreamKey: () -> Unit,
+    onUseOAuth: () -> Unit,
+    onStartDeviceAuth: () -> Unit,
+    onOpenTwitchDocs: () -> Unit
+) {
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Color.Black.copy(alpha = 0.78f))
+            .padding(16.dp),
+        contentAlignment = Alignment.Center
+    ) {
+        StudioCard(modifier = Modifier.heightIn(max = 650.dp)) {
+            Column(
+                modifier = Modifier.verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(verticalArrangement = Arrangement.spacedBy(3.dp), modifier = Modifier.weight(1f)) {
+                        Text("Twitch login options", color = StudioText, fontSize = 20.sp, fontWeight = FontWeight.Black)
+                        Text(
+                            "Pick how much control Rokid Live Studio gets over your Twitch channel.",
+                            color = StudioMuted,
+                            fontSize = 12.sp,
+                            lineHeight = 16.sp
+                        )
+                    }
+                    CompactTextAction("Close", onDismiss)
+                }
+
+                YoutubeModeExplanationBlock(
+                    title = "Stream key",
+                    subtitle = "Fastest setup. No OAuth. No Twitch app required.",
+                    lines = listOf(
+                        "Paste the stream key from Twitch Creator Dashboard.",
+                        "The phone only sends RTMP video/audio.",
+                        "Title, category and chat stay outside the app."
+                    ),
+                    accent = StudioGreen
+                )
+                DialogActionButton("Use stream key mode", primary = true, onClick = onUseStreamKey)
+
+                YoutubeModeExplanationBlock(
+                    title = "OAuth account",
+                    subtitle = "Needed when the app should fetch the key, update metadata, and read chat.",
+                    lines = listOf(
+                        "The app gets the Twitch stream key automatically.",
+                        "It updates channel title/category before starting RTMP.",
+                        "It reads chat through EventSub and sends messages to the glasses helper."
+                    ),
+                    accent = StudioPurple
+                )
+                DialogActionButton("Use OAuth mode", primary = false, onClick = onUseOAuth)
+                DialogActionButton("Generate code & open page", primary = true, onClick = onStartDeviceAuth)
+
+                YoutubeModeExplanationBlock(
+                    title = "Do we need a client ID?",
+                    subtitle = "Only for Twitch OAuth mode.",
+                    lines = listOf(
+                        "Stream key mode does not need Twitch developer setup.",
+                        "OAuth mode needs a Twitch Developer app client ID.",
+                        "The MVP uses device-code login, so no client secret is stored in the app."
+                    ),
+                    accent = StudioMuted
+                )
+                DialogActionButton("Open Twitch developer console", primary = false, onClick = onOpenTwitchDocs)
             }
         }
     }
@@ -3476,6 +4851,43 @@ private fun AdvancedYoutubeSetup(
 }
 
 @Composable
+private fun AdvancedTwitchSetup(
+    state: PhoneUiState,
+    enabled: Boolean,
+    onTwitchDeviceClientIdChanged: (String) -> Unit,
+    onOpenTwitchDocs: () -> Unit
+) {
+    val fieldColors = OutlinedTextFieldDefaults.colors(
+        focusedTextColor = StudioText,
+        unfocusedTextColor = StudioText,
+        disabledTextColor = StudioMuted,
+        focusedBorderColor = StudioPurple,
+        unfocusedBorderColor = StudioBorder,
+        disabledBorderColor = StudioBorder.copy(alpha = 0.45f),
+        focusedLabelColor = StudioPurple,
+        unfocusedLabelColor = StudioMuted,
+        disabledLabelColor = StudioMuted.copy(alpha = 0.7f),
+        cursorColor = StudioPurple
+    )
+
+    StudioCard(enabled = enabled) {
+        Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            SmallInfoText("OAuth mode can fetch the Twitch stream key, update title/category, and read chat. Create an app in the Twitch Developer Console and paste its Client ID here.")
+            OutlinedTextField(
+                modifier = Modifier.fillMaxWidth(),
+                value = state.twitchDeviceClientId,
+                onValueChange = onTwitchDeviceClientIdChanged,
+                label = { Text("Twitch client ID") },
+                singleLine = true,
+                enabled = enabled,
+                colors = fieldColors
+            )
+            CompactTextAction("Open Twitch developer console", onOpenTwitchDocs)
+        }
+    }
+}
+
+@Composable
 private fun ErrorBanner(error: String) {
     if (error.isNotBlank()) {
         Box(
@@ -3632,6 +5044,15 @@ private fun YoutubeBadge(modifier: Modifier = Modifier) {
     Image(
         painter = painterResource(R.drawable.ic_brand_youtube),
         contentDescription = "YouTube",
+        modifier = modifier
+    )
+}
+
+@Composable
+private fun TwitchBadge(modifier: Modifier = Modifier) {
+    Image(
+        painter = painterResource(R.drawable.ic_brand_twitch),
+        contentDescription = "Twitch",
         modifier = modifier
     )
 }

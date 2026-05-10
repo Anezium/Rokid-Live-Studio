@@ -30,6 +30,7 @@ import kotlin.math.min
 import kotlin.random.Random
 
 class YoutubeRtmpPublisher(
+    private val platformName: String = "YouTube",
     private val onStatus: (String) -> Unit,
     private val onLiveChanged: (Boolean) -> Unit,
     private val onStats: (bytes: Long) -> Unit,
@@ -56,11 +57,11 @@ class YoutubeRtmpPublisher(
     fun start(
         streamKey: String,
         preset: VideoPreset,
-        serverUrl: String = YOUTUBE_RTMPS_SERVER
+        serverUrl: String = DEFAULT_RTMPS_SERVER
     ) {
         val key = streamKey.trim()
         if (key.isBlank()) {
-            onError("YouTube stream key missing", null)
+            onError("$platformName stream key missing", null)
             return
         }
         if (!running.compareAndSet(false, true)) return
@@ -77,16 +78,17 @@ class YoutubeRtmpPublisher(
                 val initialVideo = waitForInitialVideo()
                 val networkBinding = runCatching { networkBindingProvider() }
                     .getOrElse { YoutubeNetworkBinding(null, "default network") }
-                status("Connecting YouTube RTMPS via ${networkBinding.label}...")
+                status("Connecting $platformName RTMP via ${networkBinding.label}...")
                 val nextConnection = RtmpConnection(
                     serverUrl = serverUrl,
                     streamKey = key,
+                    platformName = platformName,
                     onStatus = ::status,
                     socketFactory = networkBinding.socketFactory
                 )
                 connection = nextConnection
                 nextConnection.connectAndPublish()
-                status("YouTube RTMPS connected")
+                status("$platformName RTMP connected")
                 val configBytes = nextConnection.sendAvcConfig(initialVideo.config)
                 if (configBytes <= 0) error("Rokid H.264 config incomplete")
                 recordBytes(configBytes)
@@ -94,7 +96,7 @@ class YoutubeRtmpPublisher(
                 val frameBytes = nextConnection.sendAvcFrame(initialVideo.keyFrame.payload, 0, true)
                 if (frameBytes <= 0) error("Rokid keyframe was empty")
                 recordBytes(frameBytes)
-                status("YouTube ready: ${preset.label}")
+                status("$platformName ready: ${preset.label}")
                 onReady()
                 resetQueuedAudioForLiveStart()
                 val audioConfig = lastAudioConfig
@@ -106,7 +108,7 @@ class YoutubeRtmpPublisher(
                 }
                 publishLoop(nextConnection, preset, timestampOffsetMs = initialVideo.keyFrame.timestampMs)
             }.onFailure {
-                if (running.get()) reportError("YouTube live failed", it)
+                if (running.get()) reportError("$platformName live failed", it)
             }
             stop()
         }
@@ -121,7 +123,7 @@ class YoutubeRtmpPublisher(
         job?.cancel()
         job = null
         onLiveChanged(false)
-        status("YouTube stopped")
+        status("$platformName stopped")
     }
 
     fun clearVideoState() {
@@ -139,7 +141,7 @@ class YoutubeRtmpPublisher(
             if (offerVideoConfig(configPayload, allowResync = false)) {
                 videoConfigRequired.set(false)
             } else {
-                requestVideoResync("YouTube queue is full; waiting for a clean keyframe")
+                requestVideoResync("$platformName queue is full; waiting for a clean keyframe")
             }
         }
     }
@@ -158,14 +160,14 @@ class YoutubeRtmpPublisher(
             if (needsConfig && lastVideoConfig != null) {
                 val config = requireNotNull(lastVideoConfig)
                 if (!offerVideoConfig(config, allowResync = true)) {
-                    requestVideoResync("YouTube queue is full; waiting for a clean keyframe")
+                    requestVideoResync("$platformName queue is full; waiting for a clean keyframe")
                     return
                 }
                 videoConfigRequired.set(false)
             }
         }
         if (!offerVideoFrame(OutboundMessage.VideoFrame(payload, timestampMs, keyFrame))) {
-            requestVideoResync("YouTube queue is full; waiting for a clean keyframe")
+            requestVideoResync("$platformName queue is full; waiting for a clean keyframe")
         }
     }
 
@@ -213,10 +215,10 @@ class YoutubeRtmpPublisher(
                     externalAudioActive.set(true)
                 }
                 is OutboundMessage.AacFrame -> externalAudioActive.set(true)
-                OutboundMessage.Stop -> error("YouTube start cancelled")
+                OutboundMessage.Stop -> error("$platformName start cancelled")
             }
         }
-        error("YouTube start cancelled")
+        error("$platformName start cancelled")
     }
 
     private fun resetQueuedAudioForLiveStart() {
@@ -253,7 +255,7 @@ class YoutubeRtmpPublisher(
                 is OutboundMessage.VideoConfig -> {
                     val bytes = connection.sendAvcConfig(message.payload)
                     recordBytes(bytes)
-                    status("YouTube ready: ${preset.label}")
+                    status("$platformName ready: ${preset.label}")
                 }
                 is OutboundMessage.VideoFrame -> {
                     val timestampMs = (message.timestampMs - timestampOffsetMs).coerceAtLeast(0)
@@ -331,9 +333,9 @@ class YoutubeRtmpPublisher(
     }
 
     companion object {
-        private const val TAG = "RLS-YouTube"
+        private const val TAG = "RLS-RTMP"
         private const val QUEUE_CAPACITY = 600
-        private const val YOUTUBE_RTMPS_SERVER = "rtmps://a.rtmps.youtube.com/live2"
+        private const val DEFAULT_RTMPS_SERVER = "rtmps://a.rtmps.youtube.com/live2"
     }
 
     private class SilentAacSource(
@@ -448,6 +450,7 @@ class YoutubeRtmpPublisher(
     private class RtmpConnection(
         private val serverUrl: String,
         private val streamKey: String,
+        private val platformName: String,
         private val onStatus: (String) -> Unit,
         private val socketFactory: SocketFactory?
     ) {
@@ -464,7 +467,7 @@ class YoutubeRtmpPublisher(
         fun connectAndPublish() {
             val uri = URI(serverUrl)
             val scheme = uri.scheme.lowercase()
-            val host = uri.host ?: error("Invalid YouTube RTMP host")
+            val host = uri.host ?: error("Invalid $platformName RTMP host")
             val port = if (uri.port > 0) uri.port else if (scheme == "rtmps") 443 else 1935
             val app = uri.path.trim('/').ifBlank { "live2" }
             val tcUrl = "$scheme://$host/$app"
@@ -665,7 +668,7 @@ class YoutubeRtmpPublisher(
                 timestamp = 0,
                 payload = payload
             )
-            onStatus("YouTube publish command sent")
+            onStatus("$platformName publish command sent")
         }
 
         private fun sendSetChunkSize(size: Int) {
@@ -702,14 +705,14 @@ class YoutubeRtmpPublisher(
                 val message = try {
                     readMessage()
                 } catch (_: SocketTimeoutException) {
-                    onStatus("YouTube publish pending; sending media")
+                    onStatus("$platformName publish pending; sending media")
                     return
                 } ?: continue
                 handleInboundControl(message)
                 if (!handleInboundCommand(message)) continue
                 val values = Amf0Reader(message.payload.dropAmf3MarkerIfNeeded(message.typeId)).readAll()
                 val command = values.getOrNull(0) as? String ?: continue
-                if (command == "_error") error("YouTube rejected stream: ${describeStatus(values)}")
+                if (command == "_error") error("$platformName rejected stream: ${describeStatus(values)}")
                 if (command != "onStatus") continue
                 val code = statusString(values, "code").orEmpty()
                 val level = statusString(values, "level").orEmpty()
@@ -717,7 +720,7 @@ class YoutubeRtmpPublisher(
                     code.contains("BadName", ignoreCase = true) ||
                     code.contains("Failed", ignoreCase = true)
                 ) {
-                    error("YouTube rejected stream: ${describeStatus(values)}")
+                    error("$platformName rejected stream: ${describeStatus(values)}")
                 }
                 if (code.contains("Publish.Start", ignoreCase = true) ||
                     code.contains("Publish", ignoreCase = true)
@@ -762,7 +765,7 @@ class YoutubeRtmpPublisher(
             val values = Amf0Reader(message.payload.dropAmf3MarkerIfNeeded(message.typeId)).readAll()
             val command = values.getOrNull(0) as? String ?: return false
             if (command == "onStatus" || command == "_error") {
-                onStatus("YouTube: ${describeStatus(values)}")
+                onStatus("$platformName: ${describeStatus(values)}")
             }
             return true
         }

@@ -1,8 +1,8 @@
 # Rokid Live Studio Android
 
-Android/Kotlin MVP for receiving the Rokid Glasses camera/microphone stream on the phone, then streaming from the phone to YouTube.
+Android/Kotlin MVP for receiving the Rokid Glasses camera/microphone stream on the phone, then streaming from the phone to YouTube or Twitch.
 
-The glasses helper keeps the glasses side as light as possible: it opens the Wi-Fi Direct group, captures the glasses camera/mic, and sends the media to the phone. The phone does the heavier work: preview, rotation/mirror, encoding, RTMP/RTMPS publishing, YouTube API calls, and chat polling.
+The glasses helper keeps the glasses side as light as possible: it opens the Wi-Fi Direct group, captures the glasses camera/mic, and sends the media to the phone. The phone does the heavier work: preview, rotation/mirror, encoding, RTMP/RTMPS publishing, YouTube/Twitch API calls, and chat polling.
 
 ## Network Flow
 
@@ -11,9 +11,9 @@ The glasses helper keeps the glasses side as light as possible: it opens the Wi-
 3. When streaming starts, the helper opens the Wi-Fi Direct group on the glasses.
 4. The phone joins that Wi-Fi Direct group.
 5. The phone receives H.264 video and AAC audio from the glasses.
-6. The phone can show a preview, encode the final stream, and publish to YouTube.
+6. The phone can show a preview, encode the final stream, and publish to YouTube or Twitch.
 
-Outdoor use does not require a home router. The glasses need Wi-Fi enabled so they can host Wi-Fi Direct, and the phone can keep using 4G/5G for YouTube while Wi-Fi Direct carries the glasses stream to the phone.
+Outdoor use does not require a home router. The glasses need Wi-Fi enabled so they can host Wi-Fi Direct, and the phone can keep using 4G/5G for YouTube/Twitch while Wi-Fi Direct carries the glasses stream to the phone.
 
 ## YouTube Modes
 
@@ -148,11 +148,86 @@ For distribution to other users, you have three realistic options:
 
 If the app requests sensitive or restricted scopes and is public-facing, Google may show an `unverified app` warning or enforce user caps until the OAuth app is verified. The verification process can require scope justification and a demo video showing the OAuth flow and how the requested scope is used.
 
+## Twitch Modes
+
+The Twitch screen mirrors the YouTube screen, but Twitch does not have private/unlisted livestream visibility. Twitch streams are controlled by the channel state in Creator Dashboard.
+
+| Mode | Twitch developer setup needed? | What the app controls | What stays in Twitch |
+| --- | --- | --- | --- |
+| Stream key | No | Sends video/audio to the pasted stream key | Stream key management, title, category, chat integration |
+| OAuth account | Yes | Fetches the stream key, updates channel title/category, reads chat for the helper overlay | Advanced Creator Dashboard settings |
+
+Short version: `Stream key` mode is the easiest distribution path. `OAuth account` mode is needed if you want the app to manage Twitch metadata and show Twitch chat on the glasses helper.
+
+## Simple Mode: Twitch Stream Key
+
+Use this if you want the fastest Twitch setup.
+
+1. Open Twitch Creator Dashboard.
+2. Go to `Settings` -> `Stream`.
+3. Copy the primary stream key.
+4. In Rokid Live Studio, open the Twitch screen.
+5. Select `Stream key`.
+6. Paste the key into `Stream Key`.
+7. Select the resolution and Twitch bitrate.
+8. Tap `Start Twitch Stream`.
+
+In this mode the app only sends video and audio to Twitch RTMP. It cannot change the title/category or read Twitch chat. Those options stay in Twitch Creator Dashboard and are disabled in the app.
+
+## Twitch OAuth Setup
+
+Use this if you want Rokid Live Studio to fetch the stream key automatically, update title/category, and display chat messages on the glasses helper.
+
+Official references:
+
+- [Twitch Developer Console](https://dev.twitch.tv/console/apps)
+- [Twitch Device Code Flow](https://dev.twitch.tv/docs/authentication/getting-tokens-oauth/#device-code-grant-flow)
+- [Twitch Helix API](https://dev.twitch.tv/docs/api/)
+- [Twitch EventSub WebSocket](https://dev.twitch.tv/docs/eventsub/handling-websocket-events/)
+
+### 1. Create A Twitch Developer App
+
+1. Open [Twitch Developer Console](https://dev.twitch.tv/console/apps).
+2. Click `Register Your Application`.
+3. Name it, for example `Rokid Live Studio`.
+4. If Twitch asks for an OAuth Redirect URL, enter `http://localhost`. The MVP uses device-code login, so this URL is not used by the phone flow.
+5. Choose an application category such as `Application Integration`.
+6. Create the app.
+7. Copy the `Client ID`.
+
+The MVP does not need a Twitch client secret on the phone. Device-code login uses the public Client ID.
+
+### 2. Paste The Client ID In The Android App
+
+1. Open Rokid Live Studio on the phone.
+2. Go to `Twitch`.
+3. Select `OAuth account`.
+4. Open `Advanced OAuth setup`.
+5. Paste the Twitch Developer Console `Client ID`.
+6. Tap `Generate code & open page`.
+7. The app copies the TV/device code to the clipboard and opens the Twitch activation page.
+8. Approve access with the Twitch account that owns the channel.
+9. Return to Rokid Live Studio.
+10. Tap `Refresh` if you want to verify the linked channel.
+11. Set the title, category, resolution, bitrate, and helper chat options.
+12. Tap `Start Twitch Stream`.
+
+### 3. Twitch OAuth Scopes Used By The MVP
+
+The app requests:
+
+- `channel:read:stream_key` to fetch the RTMP stream key.
+- `channel:manage:broadcast` to update the channel title/category.
+- `user:read:chat` to receive chat messages through EventSub WebSocket.
+
+After linking, the app stores the Twitch refresh token encrypted on the phone. `Sign out` removes the stored Twitch refresh token.
+
 ## Current MVP Notes
 
 - The helper app is responsible for opening Wi-Fi Direct on the glasses.
-- The phone joins the helper group and keeps the heavy network/YouTube work.
-- YouTube category and helper chat are available in OAuth mode.
-- Stream key mode is simpler but leaves all metadata in YouTube Studio.
-- YouTube chat is polled by the phone, then sent as text to the helper overlay.
-- Audio sent to YouTube comes from the glasses microphone when the helper provides it.
+- The phone joins the helper group and keeps the heavy network/YouTube/Twitch work.
+- YouTube category and helper chat are available in YouTube OAuth mode.
+- Twitch category and helper chat are available in Twitch OAuth mode.
+- Stream key mode is simpler but leaves metadata in YouTube Studio or Twitch Creator Dashboard.
+- YouTube/Twitch chat is read by the phone, then sent as text to the helper overlay.
+- Audio sent to YouTube/Twitch comes from the glasses microphone when the helper provides it.
