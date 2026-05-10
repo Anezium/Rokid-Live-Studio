@@ -1,0 +1,7 @@
+<resources>
+    <style name="Theme.RokidLiveStudioGlasses" parent="android:style/Theme.Material.NoActionBar">
+        <item name="android:fontFamily">sans</item>
+        <item name="android:windowFullscreen">true</item>
+        <item name="android:colorAccent">#22C55E</item>
+    </style>
+</resources>

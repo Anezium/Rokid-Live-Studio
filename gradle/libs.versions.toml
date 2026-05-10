@@ -1,0 +1,36 @@
+[versions]
+agp = "9.1.0"
+kotlin = "2.2.10"
+coreKtx = "1.18.0"
+lifecycle = "2.10.0"
+activityCompose = "1.13.0"
+composeBom = "2026.02.01"
+cameraX = "1.4.2"
+coroutines = "1.10.2"
+playServicesAuth = "21.5.1"
+
+[libraries]
+androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "coreKtx" }
+androidx-lifecycle-runtime-ktx = { group = "androidx.lifecycle", name = "lifecycle-runtime-ktx", version.ref = "lifecycle" }
+androidx-lifecycle-viewmodel-compose = { group = "androidx.lifecycle", name = "lifecycle-viewmodel-compose", version.ref = "lifecycle" }
+androidx-activity-compose = { group = "androidx.activity", name = "activity-compose", version.ref = "activityCompose" }
+androidx-compose-bom = { group = "androidx.compose", name = "compose-bom", version.ref = "composeBom" }
+androidx-compose-ui = { group = "androidx.compose.ui", name = "ui" }
+androidx-compose-ui-graphics = { group = "androidx.compose.ui", name = "ui-graphics" }
+androidx-compose-ui-tooling = { group = "androidx.compose.ui", name = "ui-tooling" }
+androidx-compose-ui-tooling-preview = { group = "androidx.compose.ui", name = "ui-tooling-preview" }
+androidx-compose-material3 = { group = "androidx.compose.material3", name = "material3" }
+androidx-camera-core = { group = "androidx.camera", name = "camera-core", version.ref = "cameraX" }
+androidx-camera-camera2 = { group = "androidx.camera", name = "camera-camera2", version.ref = "cameraX" }
+androidx-camera-lifecycle = { group = "androidx.camera", name = "camera-lifecycle", version.ref = "cameraX" }
+androidx-camera-view = { group = "androidx.camera", name = "camera-view", version.ref = "cameraX" }
+kotlinx-coroutines-android = { group = "org.jetbrains.kotlinx", name = "kotlinx-coroutines-android", version.ref = "coroutines" }
+play-services-auth = { group = "com.google.android.gms", name = "play-services-auth", version.ref = "playServicesAuth" }
+rokid-client-l = { group = "com.rokid.cxr", name = "client-l", version = "1.0.1" }
+rokid-service-bridge = { group = "com.rokid.cxr", name = "cxr-service-bridge", version = "1.0-20260212.103714-88" }
+
+[plugins]
+android-application = { id = "com.android.application", version.ref = "agp" }
+android-library = { id = "com.android.library", version.ref = "agp" }
+kotlin-android = { id = "org.jetbrains.kotlin.android", version.ref = "kotlin" }
+kotlin-compose = { id = "org.jetbrains.kotlin.plugin.compose", version.ref = "kotlin" }

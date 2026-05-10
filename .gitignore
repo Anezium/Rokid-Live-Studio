@@ -1,0 +1,41 @@
+# Gradle / Android build output
+.gradle/
+.kotlin/
+**/build/
+**/captures/
+**/.cxx/
+**/.externalNativeBuild/
+
+# Local machine configuration
+local.properties
+*.iml
+.idea/
+
+# Generated packages and signing material
+*.apk
+*.ap_
+*.aab
+*.jks
+*.keystore
+*.p12
+*.pem
+*.key
+
+# Secrets / service config
+.env
+.env.*
+google-services.json
+secrets.properties
+credentials.json
+client_secret*.json
+
+# Logs and diagnostics
+*.log
+*.hprof
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Local screenshot/debug references
+/*.png
