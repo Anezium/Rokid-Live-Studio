@@ -4,12 +4,20 @@
 
 # Rokid Live Studio
 
-Android/Kotlin app for receiving the Rokid Glasses camera/microphone stream on the phone, then streaming from the phone to YouTube or Twitch.
+<p align="center">
+  <a href="https://github.com/Anezium/Rokid-Live-Studio/releases/latest"><img src="https://img.shields.io/github/v/release/Anezium/Rokid-Live-Studio?label=APK&color=5CF018" alt="Latest release" /></a>
+  <img src="https://img.shields.io/badge/Android-31%2B-3DDC84?logo=android&logoColor=white" alt="Android 31+" />
+  <img src="https://img.shields.io/badge/Kotlin-2.2-7F52FF?logo=kotlin&logoColor=white" alt="Kotlin" />
+  <img src="https://img.shields.io/badge/Jetpack_Compose-Material_3-4285F4?logo=jetpackcompose&logoColor=white" alt="Jetpack Compose" />
+  <img src="https://img.shields.io/badge/YouTube-Live-FF0000?logo=youtube&logoColor=white" alt="YouTube Live" />
+  <img src="https://img.shields.io/badge/Twitch-Live-9146FF?logo=twitch&logoColor=white" alt="Twitch Live" />
+</p>
+
+Android/Kotlin app for streaming your Rokid Glasses camera and microphone from your phone to YouTube or Twitch.
 
 The glasses helper keeps the glasses side as light as possible: it opens the Wi-Fi Direct group, captures the glasses camera/mic, and sends the media to the phone. The phone does the heavier work: preview, rotation/mirror, encoding, RTMP/RTMPS publishing, YouTube/Twitch API calls, and chat polling.
 
 With OAuth mode, Rokid Live Studio can also read YouTube or Twitch chat on the phone and render chat messages inside the glasses helper overlay.
-
 
 <p align="center">
   <img src="Rokid_Live_Studio_screenshot1.jpg" width="260" alt="Rokid Live Studio home screen" />
@@ -20,6 +28,23 @@ With OAuth mode, Rokid Live Studio can also read YouTube or Twitch chat on the p
 <p align="center">
   <img src="Rokid_Live_Studio_chat.png" width="300" alt="Rokid Live Studio chat overlay on glasses" />
 </p>
+
+## Download
+
+Get the latest APK from [GitHub Releases](https://github.com/Anezium/Rokid-Live-Studio/releases/latest).
+
+## What It Does
+
+- Streams the Rokid Glasses camera and microphone to YouTube or Twitch.
+- Uses Wi-Fi Direct between the glasses and phone, so outdoor streaming does not require a home router.
+- Supports stream key mode for simple RTMP/RTMPS publishing.
+- Supports YouTube and Twitch OAuth modes for live metadata, stream key retrieval, and chat.
+- Shows YouTube/Twitch chat messages inside the glasses helper overlay.
+- Lets the phone handle preview, rotation/mirror correction, encoding, bitrate, and platform API calls.
+
+## Hardware Warning
+
+Rokid Glasses do not seem designed for long continuous camera streaming. They can get very hot, and battery drains extremely fast. For serious testing or outdoor streams, use an external battery pack or Rokid Capsules. Stop streaming if the glasses become uncomfortable to wear.
 
 ## Network Flow
 
