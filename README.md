@@ -1,8 +1,18 @@
-# Rokid Live Studio Android
+<p align="center">
+  <img src="Rokid_Live_Studio_logo.png" width="200" alt="Rokid Live Studio logo" />
+</p>
+
+# Rokid Live Studio
 
 Android/Kotlin MVP for receiving the Rokid Glasses camera/microphone stream on the phone, then streaming from the phone to YouTube or Twitch.
 
 The glasses helper keeps the glasses side as light as possible: it opens the Wi-Fi Direct group, captures the glasses camera/mic, and sends the media to the phone. The phone does the heavier work: preview, rotation/mirror, encoding, RTMP/RTMPS publishing, YouTube/Twitch API calls, and chat polling.
+
+<p align="center">
+  <img src="Rokid_Live_Studio_screenshot1.jpg" width="260" alt="Rokid Live Studio home screen" />
+  <img src="Rokid_Live_Studio_screenshot2.jpg" width="260" alt="Rokid Live Studio YouTube screen" />
+  <img src="Rokid_Live_Studio_screenshot3.jpg" width="260" alt="Rokid Live Studio Twitch screen" />
+</p>
 
 ## Network Flow
 
