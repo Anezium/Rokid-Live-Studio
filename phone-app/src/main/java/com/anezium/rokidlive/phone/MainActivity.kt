@@ -3323,11 +3323,11 @@ private fun SettingsStudioScreen(
 ) {
     val update = state.update
     val updateButtonText = when {
-        update.checking -> "Checking..."
-        update.downloading -> "Downloading..."
-        update.available && update.apkPath.isNotBlank() -> "Install Downloaded Update"
-        update.available -> "Download & Install Update"
-        else -> "Check & Install Update"
+        update.checking -> "Checking for Update"
+        update.downloading -> "Downloading APK"
+        update.available && update.apkPath.isNotBlank() -> "Open Installer"
+        update.available -> "Install Update"
+        else -> "Check for Update"
     }
     val updateEnabled = !update.checking && !update.downloading
     Column(
@@ -3346,7 +3346,6 @@ private fun SettingsStudioScreen(
                 }
                 MiniMetric("Phone package", "com.anezium.rokidlive.phone")
                 MiniMetric("Glasses helper", "com.anezium.rokidlive.glasses")
-                MiniMetric("Installed version", "${update.currentVersionName} (${update.currentVersionCode})")
                 MiniMetric("Selected resolution", state.selectedPreset.youtubeResolutionLabel(state.previewRotationDegrees))
             }
         }
@@ -3358,19 +3357,24 @@ private fun SettingsStudioScreen(
                 }
                 Text(
                     update.status.ifBlank {
-                        "Check public GitHub Releases, download the latest phone APK, then open Android's package installer."
+                        "Checks the official GitHub release, downloads the newest phone APK, then opens Android Package Installer."
                     },
                     color = StudioMuted,
                     fontSize = 15.sp,
                     lineHeight = 21.sp
                 )
+                StudioInfoCard(
+                    label = "Installed",
+                    value = "${update.currentVersionName} (${update.currentVersionCode})",
+                    icon = StudioIcon.PHONE
+                )
                 if (update.available) {
                     StudioInfoCard(
-                        label = "Latest release",
+                        label = "Available",
                         value = listOfNotNull(
                             update.latestVersionName.ifBlank { update.latestTag }.takeIf { it.isNotBlank() },
                             update.apkName.takeIf { it.isNotBlank() }
-                        ).joinToString(" / ").ifBlank { "APK available" },
+                        ).joinToString("  /  ").ifBlank { "APK available" },
                         icon = StudioIcon.BROADCAST
                     )
                 }
@@ -3383,20 +3387,6 @@ private fun SettingsStudioScreen(
                 CompactTextAction(
                     text = "Open GitHub Releases",
                     onClick = onOpenReleases
-                )
-            }
-        }
-        StudioCard {
-            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                    IconGlyph(StudioIcon.KEY, StudioGreen, Modifier.size(28.dp))
-                    Text("Release naming", color = StudioText, fontSize = 20.sp, fontWeight = FontWeight.Bold)
-                }
-                Text(
-                    "Use tags like v0.1.1 or v0.1.1+2. If the release body contains `versionCode: 2`, the app uses that for comparison.",
-                    color = StudioMuted,
-                    fontSize = 14.sp,
-                    lineHeight = 20.sp
                 )
             }
         }

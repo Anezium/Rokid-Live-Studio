@@ -38,8 +38,8 @@ android {
         applicationId = "com.anezium.rokidlive.glasses"
         minSdk = 31
         targetSdk = 28
-        versionCode = 1
-        versionName = "0.1.0"
+        versionCode = 2
+        versionName = "0.1.1"
     }
 
     compileOptions {
