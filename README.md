@@ -223,31 +223,6 @@ The app requests:
 
 After linking, the app stores the Twitch refresh token encrypted on the phone. `Sign out` removes the stored Twitch refresh token.
 
-## Distribution And Updates
-
-Best options:
-
-| Path | Best for | Update behavior |
-| --- | --- | --- |
-| Google Play internal/closed testing | Real users and the cleanest install/update flow | Android handles updates |
-| Firebase App Distribution | Private testers | Testers get install/update links |
-| GitHub Releases | Direct APK distribution | Users install APKs manually unless the app adds an update checker |
-
-GitHub can build and publish APKs, but do not commit signing keys or API secrets. Store release signing material in GitHub Secrets, for example:
-
-- `ANDROID_KEYSTORE_BASE64`
-- `ANDROID_KEYSTORE_PASSWORD`
-- `ANDROID_KEY_ALIAS`
-- `ANDROID_KEY_PASSWORD`
-
-For public direct APK updates, the phone app Settings screen has a `Check & Install Update` button. It checks the latest public GitHub Release, finds a `.apk` asset, compares the release tag/body with the installed app version, downloads the APK when it is newer, then opens Android's package installer. If the GitHub repo stays private, do not put a GitHub token in the APK; use Play Store/Firebase or a small public update JSON endpoint instead.
-
-Release naming expected by the in-app updater:
-
-- Use tags like `v0.1.1`.
-- Prefer tags like `v0.1.1+2` or add `versionCode: 2` in the release body when you want strict `versionCode` comparison.
-- Attach the phone APK to the release. If multiple APKs are attached, names containing `phone` or `rokid-live-studio` are preferred over helper/glasses APKs.
-
 ## Current MVP Notes
 
 - The helper app is responsible for opening Wi-Fi Direct on the glasses.

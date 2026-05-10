@@ -1,7 +1,30 @@
+import java.util.Properties
+
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.compose)
 }
+
+val secretProperties = Properties().apply {
+    val file = rootProject.file("secrets.properties")
+    if (file.isFile) file.inputStream().use(::load)
+}
+
+fun signingValue(name: String): String? =
+    providers.gradleProperty(name).orNull
+        ?: providers.environmentVariable(name).orNull
+        ?: secretProperties.getProperty(name)
+
+val releaseStoreFilePath = signingValue("RLS_RELEASE_STORE_FILE")
+val releaseStorePassword = signingValue("RLS_RELEASE_STORE_PASSWORD")
+val releaseKeyAlias = signingValue("RLS_RELEASE_KEY_ALIAS")
+val releaseKeyPassword = signingValue("RLS_RELEASE_KEY_PASSWORD")
+val hasReleaseSigning = listOf(
+    releaseStoreFilePath,
+    releaseStorePassword,
+    releaseKeyAlias,
+    releaseKeyPassword
+).all { !it.isNullOrBlank() }
 
 android {
     namespace = "com.anezium.rokidlive.phone"
@@ -27,16 +50,48 @@ android {
         compose = true
     }
 
-    val helperApkAssetsDir = layout.buildDirectory.dir("generated/assets/glasses-helper/debug").get().asFile
-    sourceSets.getByName("debug").assets.srcDir(helperApkAssetsDir)
-    val copyGlassesHelperDebugApk by tasks.registering(Copy::class) {
-        dependsOn(":glasses-helper:assembleDebug")
-        from(project(":glasses-helper").layout.buildDirectory.file("outputs/apk/debug/glasses-helper-debug.apk"))
-        into(helperApkAssetsDir)
-        rename { "glasses-helper-debug.apk" }
+    signingConfigs {
+        create("release") {
+            if (hasReleaseSigning) {
+                storeFile = rootProject.file(releaseStoreFilePath!!)
+                storePassword = releaseStorePassword
+                keyAlias = releaseKeyAlias
+                keyPassword = releaseKeyPassword
+            }
+        }
     }
-    tasks.matching { it.name == "mergeDebugAssets" }.configureEach {
-        dependsOn(copyGlassesHelperDebugApk)
+
+    buildTypes {
+        release {
+            if (hasReleaseSigning) {
+                signingConfig = signingConfigs.getByName("release")
+            }
+        }
+    }
+
+    listOf("debug", "release").forEach { buildTypeName ->
+        val variantName = buildTypeName.replaceFirstChar { it.uppercaseChar() }
+        val helperApkAssetsDir = layout.buildDirectory.dir("generated/assets/glasses-helper/$buildTypeName").get().asFile
+        val helperApkName = when {
+            buildTypeName == "debug" -> "glasses-helper-debug.apk"
+            hasReleaseSigning -> "glasses-helper-release.apk"
+            else -> "glasses-helper-release-unsigned.apk"
+        }
+        sourceSets.getByName(buildTypeName).assets.srcDir(helperApkAssetsDir)
+        val copyHelperApk = tasks.register<Copy>("copyGlassesHelper${variantName}Apk") {
+            dependsOn(":glasses-helper:assemble$variantName")
+            from(project(":glasses-helper").layout.buildDirectory.file("outputs/apk/$buildTypeName/$helperApkName"))
+            into(helperApkAssetsDir)
+            rename { "glasses-helper-debug.apk" }
+        }
+        val generatedAssetConsumers = setOf(
+            "merge${variantName}Assets",
+            "generate${variantName}LintVitalReportModel",
+            "lintVitalAnalyze${variantName}"
+        )
+        tasks.matching { it.name in generatedAssetConsumers }.configureEach {
+            dependsOn(copyHelperApk)
+        }
     }
 }
 

@@ -1,7 +1,30 @@
+import java.util.Properties
+
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.compose)
 }
+
+val secretProperties = Properties().apply {
+    val file = rootProject.file("secrets.properties")
+    if (file.isFile) file.inputStream().use(::load)
+}
+
+fun signingValue(name: String): String? =
+    providers.gradleProperty(name).orNull
+        ?: providers.environmentVariable(name).orNull
+        ?: secretProperties.getProperty(name)
+
+val releaseStoreFilePath = signingValue("RLS_RELEASE_STORE_FILE")
+val releaseStorePassword = signingValue("RLS_RELEASE_STORE_PASSWORD")
+val releaseKeyAlias = signingValue("RLS_RELEASE_KEY_ALIAS")
+val releaseKeyPassword = signingValue("RLS_RELEASE_KEY_PASSWORD")
+val hasReleaseSigning = listOf(
+    releaseStoreFilePath,
+    releaseStorePassword,
+    releaseKeyAlias,
+    releaseKeyPassword
+).all { !it.isNullOrBlank() }
 
 android {
     namespace = "com.anezium.rokidlive.glasses"
@@ -25,6 +48,29 @@ android {
     }
     buildFeatures {
         compose = true
+    }
+
+    lint {
+        disable += "ExpiredTargetSdkVersion"
+    }
+
+    signingConfigs {
+        create("release") {
+            if (hasReleaseSigning) {
+                storeFile = rootProject.file(releaseStoreFilePath!!)
+                storePassword = releaseStorePassword
+                keyAlias = releaseKeyAlias
+                keyPassword = releaseKeyPassword
+            }
+        }
+    }
+
+    buildTypes {
+        release {
+            if (hasReleaseSigning) {
+                signingConfig = signingConfigs.getByName("release")
+            }
+        }
     }
 }
 
