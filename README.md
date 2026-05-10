@@ -190,10 +190,11 @@ Official references:
 1. Open [Twitch Developer Console](https://dev.twitch.tv/console/apps).
 2. Click `Register Your Application`.
 3. Name it, for example `Rokid Live Studio`.
-4. If Twitch asks for an OAuth Redirect URL, enter `http://localhost`. The MVP uses device-code login, so this URL is not used by the phone flow.
-5. Choose an application category such as `Application Integration`.
-6. Create the app.
-7. Copy the `Client ID`.
+4. Choose `Public` as the client type. Android APKs cannot keep a client secret private.
+5. If Twitch asks for an OAuth Redirect URL, enter `http://localhost`. The MVP uses device-code login, so this URL is not used by the phone flow.
+6. Choose an application category such as `Application Integration`.
+7. Create the app.
+8. Copy the `Client ID`.
 
 The MVP does not need a Twitch client secret on the phone. Device-code login uses the public Client ID.
 

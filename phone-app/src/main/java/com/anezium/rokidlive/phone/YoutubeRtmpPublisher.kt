@@ -6,28 +6,43 @@ import android.media.MediaFormat
 import android.util.Log
 import com.anezium.rokidlive.shared.H264AnnexB
 import com.anezium.rokidlive.shared.VideoPreset
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.io.ByteArrayOutputStream
 import java.io.DataInputStream
+import java.io.IOException
 import java.io.InputStream
 import java.io.OutputStream
 import java.net.InetSocketAddress
 import java.net.Socket
+import java.net.SocketException
 import java.net.SocketTimeoutException
 import java.net.URI
+import java.net.UnknownHostException
 import java.nio.ByteBuffer
 import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicLong
 import javax.net.SocketFactory
+import javax.net.ssl.SSLException
 import javax.net.ssl.SSLSocket
 import javax.net.ssl.SSLSocketFactory
 import kotlin.math.min
 import kotlin.random.Random
+
+data class RtmpDiagnostics(
+    val endpoint: String = "",
+    val network: String = "",
+    val videoBitrate: Int = 0,
+    val reconnects: Long = 0,
+    val droppedVideoFrames: Long = 0
+)
 
 class YoutubeRtmpPublisher(
     private val platformName: String = "YouTube",
@@ -37,7 +52,8 @@ class YoutubeRtmpPublisher(
     private val onError: (String, Throwable?) -> Unit,
     private val networkBindingProvider: () -> YoutubeNetworkBinding = { YoutubeNetworkBinding(null, "default network") },
     private val onReady: () -> Unit = {},
-    private val onVideoBackpressure: () -> Unit = {}
+    private val onVideoBackpressure: () -> Unit = {},
+    private val onDiagnostics: (RtmpDiagnostics) -> Unit = {}
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val running = AtomicBoolean(false)
@@ -52,42 +68,90 @@ class YoutubeRtmpPublisher(
     private val externalAudioActive = AtomicBoolean(false)
     private val videoResyncRequired = AtomicBoolean(false)
     private val videoConfigRequired = AtomicBoolean(true)
+    private val droppedVideoFrames = AtomicLong(0L)
+    private val reconnects = AtomicLong(0L)
+    private var activeEndpoint = ""
+    private var activeNetwork = ""
+    private var activeVideoBitrate = 0
     private var bytesSent = 0L
 
     fun start(
         streamKey: String,
         preset: VideoPreset,
-        serverUrl: String = DEFAULT_RTMPS_SERVER
+        serverUrl: String = DEFAULT_RTMPS_SERVER,
+        fallbackServerUrls: List<String> = emptyList(),
+        videoBitrate: Int = preset.youtubeVideoBitrate.takeIf { it > 0 } ?: preset.videoBitrate
     ) {
         val key = streamKey.trim()
         if (key.isBlank()) {
             onError("$platformName stream key missing", null)
             return
         }
+        val endpoints = rtmpEndpoints(serverUrl, fallbackServerUrls)
+        if (endpoints.isEmpty()) {
+            onError("$platformName RTMP server missing", null)
+            return
+        }
         if (!running.compareAndSet(false, true)) return
         queue.clear()
         baseVideoTimestampUs = -1L
         baseAudioTimestampUs = -1L
+        activeEndpoint = ""
+        activeNetwork = ""
+        activeVideoBitrate = videoBitrate
+        droppedVideoFrames.set(0L)
+        reconnects.set(0L)
         videoResyncRequired.set(false)
         videoConfigRequired.set(true)
         bytesSent = 0L
+        emitDiagnostics()
         onLiveChanged(true)
         status("Waiting for Rokid video keyframe...")
         job = scope.launch {
+            try {
+                publishWithReconnect(key, preset, endpoints)
+            } finally {
+                finishStopped()
+                job = null
+            }
+        }
+    }
+
+    fun stop() {
+        finishStopped()
+        job?.cancel()
+        job = null
+    }
+
+    private suspend fun publishWithReconnect(
+        streamKey: String,
+        preset: VideoPreset,
+        endpoints: List<String>
+    ) {
+        var endpointIndex = 0
+        var reconnectAttempt = 0
+        var connectedAtMs = 0L
+        while (running.get()) {
             runCatching {
+                connectedAtMs = 0L
                 val initialVideo = waitForInitialVideo()
                 val networkBinding = runCatching { networkBindingProvider() }
                     .getOrElse { YoutubeNetworkBinding(null, "default network") }
-                status("Connecting $platformName RTMP via ${networkBinding.label}...")
+                val endpoint = endpoints[endpointIndex % endpoints.size]
+                activeEndpoint = endpoint.rtmpEndpointLabel()
+                activeNetwork = networkBinding.label
+                emitDiagnostics()
+                status("Connecting $platformName RTMP to $activeEndpoint via ${networkBinding.label}...")
                 val nextConnection = RtmpConnection(
-                    serverUrl = serverUrl,
-                    streamKey = key,
+                    serverUrl = endpoint,
+                    streamKey = streamKey,
                     platformName = platformName,
                     onStatus = ::status,
                     socketFactory = networkBinding.socketFactory
                 )
                 connection = nextConnection
                 nextConnection.connectAndPublish()
+                connectedAtMs = System.currentTimeMillis()
                 status("$platformName RTMP connected")
                 val configBytes = nextConnection.sendAvcConfig(initialVideo.config)
                 if (configBytes <= 0) error("Rokid H.264 config incomplete")
@@ -107,23 +171,45 @@ class YoutubeRtmpPublisher(
                     startSilentAudio()
                 }
                 publishLoop(nextConnection, preset, timestampOffsetMs = initialVideo.keyFrame.timestampMs)
-            }.onFailure {
-                if (running.get()) reportError("$platformName live failed", it)
+                return
+            }.onFailure { throwable ->
+                if (throwable is CancellationException || !running.get()) return
+                stopSilentAudio()
+                runCatching { connection?.close() }
+                connection = null
+                val connectedForMs = if (connectedAtMs > 0L) System.currentTimeMillis() - connectedAtMs else 0L
+                if (connectedForMs >= RECONNECT_STABLE_RESET_MS) reconnectAttempt = 0
+                if (!throwable.isRecoverableRtmpFailure() || reconnectAttempt >= MAX_RECONNECT_ATTEMPTS) {
+                    reportError("$platformName live failed: ${throwable.rtmpUserMessage()}", throwable)
+                    return
+                }
+                reconnectAttempt++
+                reconnects.incrementAndGet()
+                endpointIndex = (endpointIndex + 1) % endpoints.size
+                resetForReconnect()
+                val nextEndpoint = endpoints[endpointIndex % endpoints.size].rtmpEndpointLabel()
+                status(
+                    "$platformName connection lost: ${throwable.rtmpUserMessage()}. " +
+                        "Reconnecting $reconnectAttempt/$MAX_RECONNECT_ATTEMPTS to $nextEndpoint..."
+                )
+                emitDiagnostics()
+                delay(RECONNECT_DELAY_MS * reconnectAttempt)
             }
-            stop()
         }
     }
 
-    fun stop() {
+    private fun finishStopped() {
         if (!running.getAndSet(false)) return
         stopSilentAudio()
         queue.offer(OutboundMessage.Stop)
         runCatching { connection?.close() }
         connection = null
-        job?.cancel()
-        job = null
         onLiveChanged(false)
         status("$platformName stopped")
+        activeEndpoint = ""
+        activeNetwork = ""
+        activeVideoBitrate = 0
+        emitDiagnostics()
     }
 
     fun clearVideoState() {
@@ -135,10 +221,14 @@ class YoutubeRtmpPublisher(
     }
 
     fun configureVideo(configPayload: ByteArray) {
-        lastVideoConfig = configPayload
+        val previous = lastVideoConfig
+        val unchanged = previous?.contentEquals(configPayload) == true
+        if (unchanged && !videoConfigRequired.get()) return
+        val storedConfig = if (unchanged) requireNotNull(previous) else configPayload.copyOf()
+        lastVideoConfig = storedConfig
         videoConfigRequired.set(true)
         if (running.get() && !videoResyncRequired.get()) {
-            if (offerVideoConfig(configPayload, allowResync = false)) {
+            if (offerVideoConfig(storedConfig, allowResync = false)) {
                 videoConfigRequired.set(false)
             } else {
                 requestVideoResync("$platformName queue is full; waiting for a clean keyframe")
@@ -153,6 +243,8 @@ class YoutubeRtmpPublisher(
         }
         val timestampMs = ((timestampUs - baseVideoTimestampUs).coerceAtLeast(0L) / 1_000L).toInt()
         if (videoResyncRequired.get() && !keyFrame) {
+            droppedVideoFrames.incrementAndGet()
+            emitDiagnostics()
             return
         }
         if (keyFrame) {
@@ -172,11 +264,11 @@ class YoutubeRtmpPublisher(
     }
 
     fun configureAudio(configPayload: ByteArray) {
-        lastAudioConfig = configPayload
+        lastAudioConfig = configPayload.copyOf()
         externalAudioActive.set(true)
         stopSilentAudio()
         if (running.get()) {
-            offerAudio(OutboundMessage.AacConfig(configPayload))
+            offerAudio(OutboundMessage.AacConfig(requireNotNull(lastAudioConfig)))
         }
     }
 
@@ -297,10 +389,18 @@ class YoutubeRtmpPublisher(
     }
 
     private fun clearQueuedMediaForVideoResync() {
+        var dropped = 0L
         queue.removeIf {
-            it is OutboundMessage.VideoConfig ||
+            val remove =
+                it is OutboundMessage.VideoConfig ||
                 it is OutboundMessage.VideoFrame ||
                 it is OutboundMessage.AacFrame
+            if (remove && it is OutboundMessage.VideoFrame) dropped++
+            remove
+        }
+        if (dropped > 0L) {
+            droppedVideoFrames.addAndGet(dropped)
+            emitDiagnostics()
         }
     }
 
@@ -317,6 +417,75 @@ class YoutubeRtmpPublisher(
     private fun reportError(message: String, throwable: Throwable?) {
         Log.e(TAG, message, throwable)
         onError(message, throwable)
+    }
+
+    private fun resetForReconnect() {
+        baseVideoTimestampUs = -1L
+        baseAudioTimestampUs = -1L
+        videoConfigRequired.set(true)
+        videoResyncRequired.set(true)
+        clearQueuedMediaForVideoResync()
+        onVideoBackpressure()
+    }
+
+    private fun emitDiagnostics() {
+        onDiagnostics(
+            RtmpDiagnostics(
+                endpoint = activeEndpoint,
+                network = activeNetwork,
+                videoBitrate = activeVideoBitrate,
+                reconnects = reconnects.get(),
+                droppedVideoFrames = droppedVideoFrames.get()
+            )
+        )
+    }
+
+    private fun rtmpEndpoints(primary: String, fallbacks: List<String>): List<String> =
+        (listOf(primary) + fallbacks)
+            .map { it.trim().removeStreamKeyPlaceholder().trimEnd('/') }
+            .filter { it.isNotBlank() }
+            .distinct()
+
+    private fun String.removeStreamKeyPlaceholder(): String =
+        replace("/{stream_key}", "")
+            .replace("{stream_key}", "")
+
+    private fun String.rtmpEndpointLabel(): String =
+        runCatching {
+            val uri = URI(this)
+            val host = uri.host ?: return@runCatching this
+            val port = if (uri.port > 0) ":${uri.port}" else ""
+            val path = uri.path.trimEnd('/').ifBlank { "/" }
+            "${uri.scheme}://$host$port$path"
+        }.getOrDefault(this)
+
+    private fun Throwable.isRecoverableRtmpFailure(): Boolean =
+        this is IOException ||
+            this is SocketException ||
+            this is SocketTimeoutException ||
+            this is SSLException ||
+            this is UnknownHostException ||
+            message.orEmpty().contains("Broken pipe", ignoreCase = true) ||
+            message.orEmpty().contains("socket is closed", ignoreCase = true)
+
+    private fun Throwable.rtmpUserMessage(): String {
+        val detail = message.orEmpty()
+        return when {
+            detail.contains("Broken pipe", ignoreCase = true) ->
+                "network socket closed while sending media"
+            detail.contains("socket is closed", ignoreCase = true) ->
+                "RTMP socket closed"
+            this is SocketTimeoutException ->
+                "RTMP server timed out"
+            this is UnknownHostException ->
+                "RTMP host not reachable"
+            this is SSLException ->
+                "secure RTMP handshake failed"
+            this is SocketException ->
+                "network socket failed${detail.takeIf { it.isNotBlank() }?.let { ": $it" }.orEmpty()}"
+            else ->
+                detail.ifBlank { this::class.java.simpleName }
+        }
     }
 
     private data class InitialVideo(
@@ -336,6 +505,9 @@ class YoutubeRtmpPublisher(
         private const val TAG = "RLS-RTMP"
         private const val QUEUE_CAPACITY = 600
         private const val DEFAULT_RTMPS_SERVER = "rtmps://a.rtmps.youtube.com/live2"
+        private const val MAX_RECONNECT_ATTEMPTS = 3
+        private const val RECONNECT_DELAY_MS = 1_500L
+        private const val RECONNECT_STABLE_RESET_MS = 30_000L
     }
 
     private class SilentAacSource(
@@ -497,12 +669,16 @@ class YoutubeRtmpPublisher(
             rawSocket.connect(InetSocketAddress(host, port), CONNECT_TIMEOUT_MS)
             rawSocket.tcpNoDelay = true
             rawSocket.keepAlive = true
+            rawSocket.sendBufferSize = SOCKET_SEND_BUFFER_BYTES
+            rawSocket.receiveBufferSize = SOCKET_RECEIVE_BUFFER_BYTES
             if (scheme != "rtmps") return rawSocket
 
             val sslFactory = SSLSocketFactory.getDefault() as SSLSocketFactory
             return (sslFactory.createSocket(rawSocket, host, port, true) as Socket).apply {
                 tcpNoDelay = true
                 keepAlive = true
+                sendBufferSize = SOCKET_SEND_BUFFER_BYTES
+                receiveBufferSize = SOCKET_RECEIVE_BUFFER_BYTES
                 (this as? SSLSocket)?.startHandshake()
             }
         }
@@ -935,6 +1111,8 @@ class YoutubeRtmpPublisher(
             private const val RTMP_TYPE_COMMAND_AMF0 = 20
             private const val CONNECT_TIMEOUT_MS = 10_000
             private const val COMMAND_TIMEOUT_MS = 12_000
+            private const val SOCKET_SEND_BUFFER_BYTES = 1024 * 1024
+            private const val SOCKET_RECEIVE_BUFFER_BYTES = 256 * 1024
         }
     }
 

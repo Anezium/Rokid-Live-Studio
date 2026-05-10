@@ -44,15 +44,21 @@ class YoutubeVideoRotationTranscoder(
     private val commands = LinkedBlockingQueue<Command>(QUEUE_CAPACITY)
     private val inputKeyframeRequired = AtomicBoolean(false)
     private var thread: Thread? = null
+    private var lastConfigPayload: ByteArray? = null
 
     fun start() {
         if (!running.compareAndSet(false, true)) return
         inputKeyframeRequired.set(false)
+        lastConfigPayload = null
         thread = Thread(::runLoop, "rls-${platformName.lowercase()}-rotator").also { it.start() }
     }
 
     fun configure(configPayload: ByteArray) {
-        offerControl(Command.Configure(configPayload))
+        val previous = lastConfigPayload
+        if (previous != null && previous.contentEquals(configPayload)) return
+        val storedConfig = configPayload.copyOf()
+        lastConfigPayload = storedConfig
+        offerControl(Command.Configure(storedConfig))
     }
 
     fun queueFrame(payload: ByteArray, timestampUs: Long, keyFrame: Boolean) {
@@ -67,6 +73,7 @@ class YoutubeVideoRotationTranscoder(
     fun stop() {
         if (!running.getAndSet(false)) return
         inputKeyframeRequired.set(false)
+        lastConfigPayload = null
         commands.offer(Command.Stop)
         thread?.interrupt()
         thread = null

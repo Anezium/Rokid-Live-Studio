@@ -227,6 +227,9 @@ class MainActivity : ComponentActivity() {
                 onMain {
                     youtubeVideoTranscoder?.requestKeyFrame() ?: cxr.requestKeyFrame()
                 }
+            },
+            onDiagnostics = { diagnostics ->
+                onMain { uiState = uiState.copy(youtubeRtmpDiagnostics = diagnostics) }
             }
         )
         twitchPublisher = YoutubeRtmpPublisher(
@@ -241,6 +244,9 @@ class MainActivity : ComponentActivity() {
                 onMain {
                     twitchVideoTranscoder?.requestKeyFrame() ?: cxr.requestKeyFrame()
                 }
+            },
+            onDiagnostics = { diagnostics ->
+                onMain { uiState = uiState.copy(twitchRtmpDiagnostics = diagnostics) }
             }
         )
         youtubeLiveApi = YoutubeLiveApi()
@@ -1364,7 +1370,12 @@ class MainActivity : ComponentActivity() {
                 storeTwitchDeviceTokens(tokens)
                 onToken(tokens.accessToken)
             }.onFailure { throwable ->
-                setError("Refresh Twitch device auth failed", throwable)
+                if (throwable.isExpiredTwitchLogin()) {
+                    clearStoredTwitchLogin()
+                    setError("Twitch login expired. Sign in again.", throwable)
+                } else {
+                    setError("Refresh Twitch device auth failed", throwable)
+                }
             }
         }
     }
@@ -1383,6 +1394,33 @@ class MainActivity : ComponentActivity() {
         )
     }
 
+    private fun clearStoredTwitchLogin() {
+        twitchDeviceAccessToken = ""
+        twitchDeviceRefreshToken = ""
+        twitchDeviceAccessTokenExpiresAtMs = 0L
+        secretStore.remove(PREF_TWITCH_DEVICE_REFRESH_TOKEN)
+        preferences.edit()
+            .remove(PREF_TWITCH_USER_ID)
+            .remove(PREF_TWITCH_USER_LOGIN)
+            .remove(PREF_TWITCH_CHANNEL_TITLE)
+            .apply()
+        uiState = uiState.copy(
+            twitchConnected = false,
+            twitchAccount = "",
+            twitchUserId = "",
+            twitchUserLogin = "",
+            twitchChannelTitle = "",
+            twitchDeviceAuthPending = false,
+            twitchDeviceUserCode = "",
+            twitchDeviceVerificationUrl = ""
+        )
+    }
+
+    private fun Throwable.isExpiredTwitchLogin(): Boolean =
+        this is TwitchDeviceAuthException &&
+            (errorCode.contains("invalid", ignoreCase = true) ||
+                message.orEmpty().contains("refresh", ignoreCase = true))
+
     private fun startYoutubeLive() {
         if (uiState.twitchLive) stopTwitchLive()
         youtubeCompleteJob?.cancel()
@@ -1396,10 +1434,12 @@ class MainActivity : ComponentActivity() {
         if (willTranscode) {
             youtubePublisher.clearVideoState()
         }
+        hidePreviewForStreaming("YouTube")
         youtubePublisher.start(
             streamKey = streamKey,
             preset = uiState.selectedPreset,
-            serverUrl = uiState.youtubeIngestionAddress.ifBlank { "rtmps://a.rtmps.youtube.com/live2" }
+            serverUrl = uiState.youtubeIngestionAddress.ifBlank { "rtmps://a.rtmps.youtube.com/live2" },
+            videoBitrate = selectedStreamingVideoBitrate(uiState.youtubeVideoBitrateOverride)
         )
         if (willTranscode) {
             startOrUpdateYoutubeVideoPipeline()
@@ -1481,15 +1521,44 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun startTwitchPublisher(streamKey: String) {
+        lifecycleScope.launch {
+            val primaryServerUrl = normalizedTwitchIngestServer(uiState.twitchIngestServerUrl)
+            val fallbackServerUrls = loadTwitchFallbackIngestServers(primaryServerUrl)
+            startTwitchPublisherWithFallbacks(streamKey, primaryServerUrl, fallbackServerUrls)
+        }
+    }
+
+    private suspend fun loadTwitchFallbackIngestServers(primaryServerUrl: String): List<String> {
+        uiState = uiState.copy(twitchStatus = "Loading Twitch ingest fallbacks...")
+        return runCatching {
+            twitchApi.getIngestServers()
+                .map { normalizedTwitchIngestServer(it.serverUrl) }
+                .filter { it != primaryServerUrl }
+                .distinct()
+                .take(TWITCH_INGEST_FALLBACK_LIMIT)
+        }.getOrElse { throwable ->
+            uiState = uiState.copy(twitchStatus = "Twitch ingest fallback list unavailable")
+            emptyList()
+        }
+    }
+
+    private fun startTwitchPublisherWithFallbacks(
+        streamKey: String,
+        primaryServerUrl: String,
+        fallbackServerUrls: List<String>
+    ) {
         applySelectedPreset()
         val willTranscode = uiState.previewRotationDegrees.normalizedRotation() != 0 || YOUTUBE_FIX_HORIZONTAL_MIRROR
         if (willTranscode) {
             twitchPublisher.clearVideoState()
         }
+        hidePreviewForStreaming("Twitch")
         twitchPublisher.start(
             streamKey = streamKey,
             preset = uiState.selectedPreset,
-            serverUrl = normalizedTwitchIngestServer(uiState.twitchIngestServerUrl)
+            serverUrl = primaryServerUrl,
+            fallbackServerUrls = fallbackServerUrls,
+            videoBitrate = selectedStreamingVideoBitrate(uiState.twitchVideoBitrateOverride)
         )
         if (willTranscode) {
             startOrUpdateTwitchVideoPipeline()
@@ -1505,6 +1574,19 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    private fun selectedStreamingVideoBitrate(overrideBitrate: Int): Int {
+        val preset = uiState.selectedPreset
+        val defaultOutputBitrate = preset.youtubeVideoBitrate.takeIf { it > 0 } ?: preset.videoBitrate
+        return overrideBitrate.takeIf { it > 0 } ?: defaultOutputBitrate
+    }
+
+    private fun hidePreviewForStreaming(platformName: String) {
+        uiState = uiState.copy(
+            previewAutoHideRequest = uiState.previewAutoHideRequest + 1,
+            lastStatus = "$platformName preview hidden for stream performance"
+        )
+    }
+
     private fun stopYoutubeLive() {
         val broadcastId = uiState.youtubeBroadcastId
         youtubeGoLiveJob?.cancel()
@@ -1518,7 +1600,8 @@ class MainActivity : ComponentActivity() {
             youtubeLive = false,
             youtubeBroadcastId = "",
             youtubeStreamId = "",
-            youtubeIngestionAddress = ""
+            youtubeIngestionAddress = "",
+            youtubeRtmpDiagnostics = RtmpDiagnostics()
         )
         completeYoutubeBroadcastAfterStop(broadcastId)
     }
@@ -1529,7 +1612,7 @@ class MainActivity : ComponentActivity() {
         twitchVideoTranscoder = null
         twitchPublisher.stop()
         stopCameraTransport()
-        uiState = uiState.copy(twitchLive = false)
+        uiState = uiState.copy(twitchLive = false, twitchRtmpDiagnostics = RtmpDiagnostics())
     }
 
     private fun normalizedTwitchIngestServer(serverUrl: String): String =
@@ -1997,6 +2080,7 @@ class MainActivity : ComponentActivity() {
         private const val YOUTUBE_INGEST_POLL_ATTEMPTS = 24
         private const val YOUTUBE_INGEST_POLL_DELAY_MS = 2_500L
         private const val YOUTUBE_CHAT_SEEN_ID_TTL_MS = 15 * 60 * 1000L
+        private const val TWITCH_INGEST_FALLBACK_LIMIT = 6
         private const val REVERSE_PORT_SPREAD = 1_000
     }
 }
@@ -2033,6 +2117,7 @@ private enum class StudioIcon {
     GLASSES,
     PHONE,
     WIFI,
+    NETWORK,
     STOP,
     EXTERNAL,
     SETTINGS,
@@ -2123,6 +2208,10 @@ private fun PhoneScreen(
 ) {
     var selectedTab by remember { mutableStateOf(StudioTab.HOME) }
     var showPreview by remember { mutableStateOf(true) }
+
+    LaunchedEffect(state.previewAutoHideRequest) {
+        if (state.previewAutoHideRequest > 0) showPreview = false
+    }
 
     BackHandler(enabled = selectedTab != StudioTab.HOME) {
         selectedTab = StudioTab.HOME
@@ -2646,6 +2735,11 @@ private fun YoutubeStudioScreen(
                     onSelected = onYoutubeBitrateSelected
                 )
 
+                RtmpDiagnosticCard(
+                    platformName = "YouTube",
+                    diagnostics = state.youtubeRtmpDiagnostics
+                )
+
                 PreviewHudCard(
                     state = state,
                     showPreview = showPreview,
@@ -2935,6 +3029,11 @@ private fun TwitchStudioScreen(
                     autoBitrate = state.selectedPreset.defaultYoutubeBitrate(),
                     enabled = !state.twitchLive,
                     onSelected = onTwitchBitrateSelected
+                )
+
+                RtmpDiagnosticCard(
+                    platformName = "Twitch",
+                    diagnostics = state.twitchRtmpDiagnostics
                 )
 
                 PreviewHudCard(
@@ -3873,6 +3972,58 @@ private fun PlatformBitrateCard(
         }
     }
 }
+
+@Composable
+private fun RtmpDiagnosticCard(
+    platformName: String,
+    diagnostics: RtmpDiagnostics
+) {
+    val hasDiagnostics = diagnostics.endpoint.isNotBlank() ||
+        diagnostics.network.isNotBlank() ||
+        diagnostics.reconnects > 0L ||
+        diagnostics.droppedVideoFrames > 0L
+    if (!hasDiagnostics) return
+    StudioCard(modifier = Modifier.heightIn(min = 74.dp)) {
+        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                IconGlyph(StudioIcon.NETWORK, StudioGreen, Modifier.size(22.dp))
+                Text("$platformName RTMP diagnostics", color = StudioText, fontSize = 15.sp, fontWeight = FontWeight.Bold)
+            }
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.Top
+            ) {
+                MiniMetric("Network", diagnostics.network.shortNetworkLabel().ifBlank { "-" })
+                MiniMetric("Bitrate", diagnostics.videoBitrate.takeIf { it > 0 }?.bitrateLabel() ?: "-")
+                MiniMetric("Reconnects", diagnostics.reconnects.toString())
+                MiniMetric("Drops", diagnostics.droppedVideoFrames.toString())
+            }
+            if (diagnostics.endpoint.isNotBlank()) {
+                Text(
+                    diagnostics.endpoint,
+                    color = StudioMuted,
+                    fontSize = 11.sp,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+        }
+    }
+}
+
+private fun String.shortNetworkLabel(): String =
+    when {
+        contains("cellular", ignoreCase = true) -> "Cellular"
+        contains("wi-fi", ignoreCase = true) || contains("wifi", ignoreCase = true) -> "Wi-Fi"
+        contains("ethernet", ignoreCase = true) -> "Ethernet"
+        contains("vpn", ignoreCase = true) -> "VPN"
+        else -> this
+    }
 
 @Composable
 private fun StudioInfoCard(label: String, value: String, icon: StudioIcon) {
@@ -5151,6 +5302,15 @@ private fun IconGlyph(icon: StudioIcon, tint: Color, modifier: Modifier = Modifi
                 drawArc(tint, 220f, 100f, false, Offset(w * 0.20f, h * 0.37f), Size(w * 0.60f, h * 0.50f), style = stroke)
                 drawArc(tint, 230f, 80f, false, Offset(w * 0.36f, h * 0.56f), Size(w * 0.28f, h * 0.24f), style = stroke)
                 drawCircle(tint, min * 0.08f, Offset(w * 0.50f, h * 0.82f))
+            }
+
+            StudioIcon.NETWORK -> {
+                drawCircle(tint, min * 0.12f, Offset(w * 0.50f, h * 0.18f), style = stroke)
+                drawCircle(tint, min * 0.12f, Offset(w * 0.20f, h * 0.72f), style = stroke)
+                drawCircle(tint, min * 0.12f, Offset(w * 0.80f, h * 0.72f), style = stroke)
+                drawLine(tint, Offset(w * 0.44f, h * 0.28f), Offset(w * 0.26f, h * 0.62f), strokeWidth = min * 0.06f, cap = StrokeCap.Round)
+                drawLine(tint, Offset(w * 0.56f, h * 0.28f), Offset(w * 0.74f, h * 0.62f), strokeWidth = min * 0.06f, cap = StrokeCap.Round)
+                drawLine(tint, Offset(w * 0.32f, h * 0.72f), Offset(w * 0.68f, h * 0.72f), strokeWidth = min * 0.06f, cap = StrokeCap.Round)
             }
 
             StudioIcon.STOP -> {
