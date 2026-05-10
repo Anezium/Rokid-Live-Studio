@@ -111,6 +111,7 @@ class MainActivity : ComponentActivity() {
     private var lastVideoConfig: ByteArray? = null
     private var p2pAutoStream = false
     private var reverseAttempted = false
+    private var reversePortCursor = (System.currentTimeMillis() % REVERSE_PORT_SPREAD.toLong()).toInt()
     private lateinit var decoder: VideoPreviewDecoder
     private lateinit var cxr: CxrPhoneController
     private lateinit var youtubePublisher: YoutubeRtmpPublisher
@@ -221,7 +222,7 @@ class MainActivity : ComponentActivity() {
             onStats = { bytes -> onMain { uiState = uiState.copy(youtubeBytesSent = bytes) } },
             onError = { message, throwable -> onMain { setError(message, throwable) } },
             networkBindingProvider = { youtubeNetworkSelector.select() },
-            onReady = { onMain { startYoutubeBroadcastWhenRtmpReady() } },
+            onReady = { onMain { uiState = uiState.copy(error = ""); startYoutubeBroadcastWhenRtmpReady() } },
             onVideoBackpressure = {
                 onMain {
                     youtubeVideoTranscoder?.requestKeyFrame() ?: cxr.requestKeyFrame()
@@ -235,7 +236,7 @@ class MainActivity : ComponentActivity() {
             onStats = { bytes -> onMain { uiState = uiState.copy(twitchBytesSent = bytes) } },
             onError = { message, throwable -> onMain { setError(message, throwable) } },
             networkBindingProvider = { youtubeNetworkSelector.select() },
-            onReady = { onMain { uiState = uiState.copy(twitchStatus = "Twitch stream is live") } },
+            onReady = { onMain { uiState = uiState.copy(twitchStatus = "Twitch stream is live", error = "") } },
             onVideoBackpressure = {
                 onMain {
                     twitchVideoTranscoder?.requestKeyFrame() ?: cxr.requestKeyFrame()
@@ -508,9 +509,10 @@ class MainActivity : ComponentActivity() {
         reverseAttempted = true
         ingressServer?.stop()
         reverseClient?.stop()
+        val reversePort = nextReversePort()
         val client = ReverseMediaClient(
             hosts = helperHosts,
-            port = Protocol.DEFAULT_REVERSE_PORT,
+            port = reversePort,
             expectedToken = uiState.sessionToken,
             decoder = decoder,
             onRunningChanged = { running ->
@@ -537,15 +539,21 @@ class MainActivity : ComponentActivity() {
         reverseClient = client
         uiState = uiState.copy(
             streaming = true,
-            lastStatus = "Trying reverse media: ${helperHosts.joinToString()}:${Protocol.DEFAULT_REVERSE_PORT}"
+            error = "",
+            lastStatus = "Trying reverse media: ${helperHosts.joinToString()}:$reversePort"
         )
         cxr.sendStartReverseStream(
             uiState.selectedPreset.startReverseStreamConfig(
-                port = Protocol.DEFAULT_REVERSE_PORT,
+                port = reversePort,
                 token = uiState.sessionToken
             )
         )
         client.start()
+    }
+
+    private fun nextReversePort(): Int {
+        reversePortCursor = (reversePortCursor + 1) % REVERSE_PORT_SPREAD
+        return Protocol.DEFAULT_REVERSE_PORT + 1 + reversePortCursor
     }
 
     private fun stopStream() {
@@ -1984,6 +1992,7 @@ class MainActivity : ComponentActivity() {
         private const val YOUTUBE_INGEST_POLL_ATTEMPTS = 24
         private const val YOUTUBE_INGEST_POLL_DELAY_MS = 2_500L
         private const val YOUTUBE_CHAT_SEEN_ID_TTL_MS = 15 * 60 * 1000L
+        private const val REVERSE_PORT_SPREAD = 1_000
     }
 }
 
