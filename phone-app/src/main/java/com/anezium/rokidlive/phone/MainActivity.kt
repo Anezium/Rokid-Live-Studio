@@ -355,6 +355,7 @@ class MainActivity : ComponentActivity() {
                 onStartYoutube = { startYoutubeLive() },
                 onStopYoutube = { stopYoutubeLive() },
                 onStopStream = { stopStream() },
+                onOpenReleases = { openUrl("https://github.com/Anezium/Rokid-Live-Studio/releases") },
                 onRequestKeyFrame = { cxr.requestKeyFrame() }
             )
         }
@@ -2105,7 +2106,7 @@ private enum class StudioTab(val label: String) {
     HOME("Home"),
     YOUTUBE("YouTube"),
     TWITCH("Twitch"),
-    HISTORY("History")
+    SETTINGS("Settings")
 }
 
 private enum class YoutubeConnectionMode(val label: String) {
@@ -2130,7 +2131,6 @@ private enum class StudioIcon {
     COPY,
     HOME,
     TWITCH,
-    HISTORY,
     BROADCAST
 }
 
@@ -2204,6 +2204,7 @@ private fun PhoneScreen(
     onStartYoutube: () -> Unit,
     onStopYoutube: () -> Unit,
     onStopStream: () -> Unit,
+    onOpenReleases: () -> Unit,
     onRequestKeyFrame: () -> Unit
 ) {
     var selectedTab by remember { mutableStateOf(StudioTab.HOME) }
@@ -2302,10 +2303,9 @@ private fun PhoneScreen(
                     onStartTwitch = onStartTwitch,
                     onStopTwitch = onStopTwitch
                 )
-                StudioTab.HISTORY -> PlaceholderStudioScreen(
-                    tab = selectedTab,
-                    onOpenYoutube = { selectedTab = StudioTab.YOUTUBE },
-                    onSelectTab = { selectedTab = it }
+                StudioTab.SETTINGS -> SettingsStudioScreen(
+                    state = state,
+                    onOpenReleases = onOpenReleases
                 )
             }
 
@@ -2500,7 +2500,7 @@ private fun HomeStudioScreen(
             .padding(start = 14.dp, top = 18.dp, end = 14.dp, bottom = 112.dp),
         verticalArrangement = Arrangement.spacedBy(14.dp)
     ) {
-        StudioBrandHeader(onSettingsClick = onConnectRokid)
+        StudioBrandHeader()
 
         DeviceStatusCard(
             state = state,
@@ -3162,31 +3162,45 @@ private fun TwitchStudioScreen(
 }
 
 @Composable
-private fun PlaceholderStudioScreen(
-    tab: StudioTab,
-    onOpenYoutube: () -> Unit,
-    onSelectTab: (StudioTab) -> Unit
+private fun SettingsStudioScreen(
+    state: PhoneUiState,
+    onOpenReleases: () -> Unit
 ) {
     Column(
         modifier = Modifier
             .fillMaxSize()
+            .verticalScroll(rememberScrollState())
             .padding(start = 14.dp, top = 18.dp, end = 14.dp, bottom = 112.dp),
-        verticalArrangement = Arrangement.spacedBy(16.dp)
+            verticalArrangement = Arrangement.spacedBy(16.dp)
     ) {
-        StudioBrandHeader(onSettingsClick = { })
+        StudioBrandHeader()
+        StudioCard {
+            Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                    IconGlyph(StudioIcon.SETTINGS, StudioGreen, Modifier.size(28.dp))
+                    Text("Settings", color = StudioText, fontSize = 24.sp, fontWeight = FontWeight.Bold)
+                }
+                MiniMetric("Phone package", "com.anezium.rokidlive.phone")
+                MiniMetric("Glasses helper", "com.anezium.rokidlive.glasses")
+                MiniMetric("Selected resolution", state.selectedPreset.youtubeResolutionLabel(state.previewRotationDegrees))
+            }
+        }
         StudioCard {
             Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                Text(tab.label, color = StudioText, fontSize = 24.sp, fontWeight = FontWeight.Bold)
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                    IconGlyph(StudioIcon.EXTERNAL, StudioGreen, Modifier.size(28.dp))
+                    Text("Updates", color = StudioText, fontSize = 20.sp, fontWeight = FontWeight.Bold)
+                }
                 Text(
-                    "This section is reserved for the next streaming destination.",
+                    "Ship APKs through GitHub Releases, then add an in-app update checker or use Play Store internal testing.",
                     color = StudioMuted,
                     fontSize = 15.sp,
                     lineHeight = 21.sp
                 )
                 StudioPrimaryButton(
-                    text = "Open YouTube Setup",
-                    icon = StudioIcon.YOUTUBE,
-                    onClick = onOpenYoutube
+                    text = "Open GitHub Releases",
+                    icon = StudioIcon.EXTERNAL,
+                    onClick = onOpenReleases
                 )
             }
         }
@@ -3194,33 +3208,30 @@ private fun PlaceholderStudioScreen(
 }
 
 @Composable
-private fun StudioBrandHeader(onSettingsClick: () -> Unit) {
+private fun StudioBrandHeader() {
     Row(
         modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.SpaceBetween,
+        horizontalArrangement = Arrangement.Start,
         verticalAlignment = Alignment.CenterVertically
     ) {
-        Row(verticalAlignment = Alignment.Bottom) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
             Text(
                 "Rokid",
                 color = StudioGreen,
                 fontSize = 36.sp,
                 fontWeight = FontWeight.Black,
-                maxLines = 1
+                maxLines = 1,
+                modifier = Modifier.alignByBaseline()
             )
             Text(
                 " Live Studio",
                 color = StudioText,
                 fontSize = 30.sp,
                 fontWeight = FontWeight.Light,
-                maxLines = 1
+                maxLines = 1,
+                modifier = Modifier.alignByBaseline()
             )
         }
-        StudioRoundButton(
-            icon = StudioIcon.SETTINGS,
-            tint = StudioText,
-            onClick = onSettingsClick
-        )
     }
 }
 
@@ -5139,13 +5150,13 @@ private fun BottomNavItem(tab: StudioTab, selected: Boolean, onClick: () -> Unit
         StudioTab.HOME -> StudioGreen
         StudioTab.YOUTUBE -> StudioRed
         StudioTab.TWITCH -> StudioPurple
-        StudioTab.HISTORY -> if (selected) StudioGreen else StudioMuted
+        StudioTab.SETTINGS -> if (selected) StudioGreen else StudioMuted
     }
     val icon = when (tab) {
         StudioTab.HOME -> StudioIcon.HOME
         StudioTab.YOUTUBE -> StudioIcon.YOUTUBE
         StudioTab.TWITCH -> StudioIcon.TWITCH
-        StudioTab.HISTORY -> StudioIcon.HISTORY
+        StudioTab.SETTINGS -> StudioIcon.SETTINGS
     }
     Column(
         modifier = Modifier
@@ -5408,12 +5419,6 @@ private fun IconGlyph(icon: StudioIcon, tint: Color, modifier: Modifier = Modifi
                 drawPath(path, tint, style = stroke)
                 drawLine(tint, Offset(w * 0.43f, h * 0.36f), Offset(w * 0.43f, h * 0.50f), strokeWidth = min * 0.07f, cap = StrokeCap.Round)
                 drawLine(tint, Offset(w * 0.62f, h * 0.36f), Offset(w * 0.62f, h * 0.50f), strokeWidth = min * 0.07f, cap = StrokeCap.Round)
-            }
-
-            StudioIcon.HISTORY -> {
-                drawCircle(tint, min * 0.35f, Offset(w * 0.50f, h * 0.50f), style = stroke)
-                drawLine(tint, Offset(w * 0.50f, h * 0.28f), Offset(w * 0.50f, h * 0.52f), strokeWidth = min * 0.07f, cap = StrokeCap.Round)
-                drawLine(tint, Offset(w * 0.50f, h * 0.52f), Offset(w * 0.68f, h * 0.62f), strokeWidth = min * 0.07f, cap = StrokeCap.Round)
             }
 
             StudioIcon.BROADCAST -> {
