@@ -21,7 +21,8 @@ class GlassesAacAudioStreamer(
     private val context: Context,
     private val packetSender: () -> MediaPacketSink,
     private val onStatus: (String) -> Unit,
-    private val onError: (String, Throwable?) -> Unit
+    private val onError: (String, Throwable?) -> Unit,
+    private val onTransportLost: (String, Throwable?) -> Unit
 ) {
     private val running = AtomicBoolean(false)
     private var thread: Thread? = null
@@ -159,6 +160,7 @@ class GlassesAacAudioStreamer(
             )
         }.onFailure {
             Log.w(TAG, "Dropping audio packet", it)
+            onTransportLost("Audio media transport lost", it)
         }
     }
 

@@ -30,7 +30,9 @@ class CameraH264Streamer(
     private val context: Context,
     private val packetSender: () -> MediaPacketSink,
     private val onStats: (frames: Long, bytes: Long, dropped: Long) -> Unit,
-    private val onError: (String, Throwable?) -> Unit
+    private val onRunning: () -> Unit,
+    private val onError: (String, Throwable?) -> Unit,
+    private val onTransportLost: (String, Throwable?) -> Unit
 ) {
     private var cameraThread: HandlerThread? = null
     private var encoderThread: HandlerThread? = null
@@ -176,6 +178,7 @@ class CameraH264Streamer(
                         }
                     }.build()
                     nextSession.setRepeatingRequest(request, null, cameraHandler)
+                    onRunning()
                 }
 
                 override fun onConfigureFailed(session: CameraCaptureSession) {
@@ -249,6 +252,7 @@ class CameraH264Streamer(
             droppedFrames++
             Log.w(TAG, "Dropping encoded packet", it)
             onStats(framesSent, bytesSent, droppedFrames)
+            onTransportLost("Video media transport lost", it)
         }
     }
 

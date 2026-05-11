@@ -324,6 +324,8 @@ class YoutubeLiveApi {
             in 1080..Int.MAX_VALUE -> "1080p"
             in 720 until 1080 -> "720p"
             in 480 until 720 -> "480p"
+            in 360 until 480 -> "360p"
+            in 240 until 360 -> "240p"
             else -> "variable"
         }
 

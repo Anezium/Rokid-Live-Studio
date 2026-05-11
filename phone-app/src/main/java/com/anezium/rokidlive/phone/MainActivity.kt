@@ -402,6 +402,7 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun onDestroy() {
+        stopLiveKeepAlive()
         runCatching { cxr.sendStopStream() }
         runCatching { cxr.sendStopP2p() }
         ingressServer?.stop()
@@ -421,6 +422,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun startReceiver() {
+        startLiveKeepAlive("Receiving Rokid camera stream")
         ingressServer?.stop()
         val server = MediaIngressServer(
             port = Protocol.DEFAULT_PORT,
@@ -508,6 +510,7 @@ class MainActivity : ComponentActivity() {
     private fun startStreamToHost(host: String) {
         reverseAttempted = false
         reverseClient?.stop()
+        startLiveKeepAlive("Streaming from Rokid Glasses")
         applySelectedPreset()
         if (!uiState.receiverRunning) startReceiver()
         uiState = uiState.copy(phoneIp = host, streaming = true)
@@ -560,9 +563,10 @@ class MainActivity : ComponentActivity() {
                 handleIncomingAudioFrame(payload, timestampUs)
             },
             onLog = { log -> onMain { uiState = uiState.copy(lastStatus = log) } },
-            onError = { message, throwable -> onMain { setError(message, throwable) } }
+            onError = { message, throwable -> onMain { handleReverseMediaError(message, throwable) } }
         )
         reverseClient = client
+        startLiveKeepAlive("Streaming from Rokid Glasses")
         uiState = uiState.copy(
             streaming = true,
             error = "",
@@ -583,6 +587,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun stopStream() {
+        stopLiveKeepAlive()
         cxr.sendStopStream()
         cxr.sendStopP2p()
         stopYoutubeLive()
@@ -604,6 +609,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun stopCameraTransport() {
+        stopLiveKeepAlive()
         cxr.sendStopStream()
         cxr.sendStopP2p()
         ingressServer?.stop()
@@ -624,6 +630,7 @@ class MainActivity : ComponentActivity() {
 
     private fun startP2pStream() {
         if (!ensureP2pPermissions()) return
+        startLiveKeepAlive("Connecting Rokid Wi-Fi Direct stream")
         applySelectedPreset()
         p2pAutoStream = true
         reverseAttempted = true
@@ -677,6 +684,7 @@ class MainActivity : ComponentActivity() {
                 p2pConnector = null
                 p2pAutoStream = false
                 uiState = uiState.copy(p2pRunning = false, p2pConnected = false, p2pStatus = reason)
+                if (!uiState.youtubeLive && !uiState.twitchLive) stopLiveKeepAlive()
                 setError("Wi-Fi Direct failed: $reason", null)
             }
         )
@@ -2157,6 +2165,24 @@ class MainActivity : ComponentActivity() {
         uiState = uiState.copy(error = error, lastStatus = error)
     }
 
+    private fun startLiveKeepAlive(title: String) {
+        runCatching {
+            ContextCompat.startForegroundService(this, LiveKeepAliveService.startIntent(this, title))
+        }.onFailure {
+            setError("Live keep-alive failed", it)
+        }
+    }
+
+    private fun stopLiveKeepAlive() {
+        runCatching { startService(LiveKeepAliveService.stopIntent(this)) }
+    }
+
+    private fun handleReverseMediaError(message: String, throwable: Throwable?) {
+        setError(message, throwable)
+        uiState = uiState.copy(reverseRunning = false, streaming = false)
+        if (!uiState.youtubeLive && !uiState.twitchLive) stopLiveKeepAlive()
+    }
+
     private fun Throwable.isCancellationLike(): Boolean =
         this is CancellationException ||
             javaClass.name.contains("CancellationException") ||
@@ -2248,6 +2274,7 @@ class MainActivity : ComponentActivity() {
 }
 
 private fun requiredP2pPermissions(): Array<String> = buildList {
+    add(Manifest.permission.ACCESS_COARSE_LOCATION)
     add(Manifest.permission.ACCESS_FINE_LOCATION)
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
         add(Manifest.permission.NEARBY_WIFI_DEVICES)
@@ -2891,6 +2918,7 @@ private fun YoutubeStudioScreen(
                     selected = state.selectedPreset,
                     onSelected = onPresetSelected
                 )
+                ResolutionHeatWarning(state.selectedPreset)
 
                 YoutubeBitrateCard(
                     selectedBitrate = state.youtubeVideoBitrateOverride,
@@ -3186,6 +3214,7 @@ private fun TwitchStudioScreen(
                     selected = state.selectedPreset,
                     onSelected = onPresetSelected
                 )
+                ResolutionHeatWarning(state.selectedPreset)
 
                 PlatformBitrateCard(
                     platformName = "Twitch",
@@ -4087,10 +4116,19 @@ private fun StudioSelectCard(
             options.forEach { preset ->
                 DropdownMenuItem(
                     text = {
-                        Text(
-                            preset.youtubeResolutionLabel(preset.displayRotationDegrees),
-                            color = if (preset == selected) StudioGreen else StudioText
-                        )
+                        Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                            Text(
+                                preset.label,
+                                color = if (preset == selected) StudioGreen else StudioText,
+                                fontSize = 14.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                            Text(
+                                preset.youtubeResolutionLabel(preset.displayRotationDegrees),
+                                color = StudioMuted,
+                                fontSize = 12.sp
+                            )
+                        }
                     },
                     onClick = {
                         expanded = false
@@ -4099,6 +4137,27 @@ private fun StudioSelectCard(
                 )
             }
         }
+    }
+}
+
+@Composable
+private fun ResolutionHeatWarning(preset: VideoPreset) {
+    val warning = preset.heatWarningText() ?: return
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(12.dp))
+            .background(Color(0xFF241C08))
+            .border(1.dp, Color(0xFF8A5A12), RoundedCornerShape(12.dp))
+            .padding(12.dp)
+    ) {
+        Text(
+            warning,
+            color = Color(0xFFFACC15),
+            fontSize = 12.sp,
+            lineHeight = 16.sp,
+            fontWeight = FontWeight.Medium
+        )
     }
 }
 
@@ -5651,6 +5710,13 @@ private fun VideoPreset.youtubeResolutionLabel(rotationDegrees: Int): String {
 
 private fun VideoPreset.youtubeBitrateLabel(): String {
     return defaultYoutubeBitrate().bitrateLabel()
+}
+
+private fun VideoPreset.heatWarningText(): String? {
+    val baselinePixels = VideoPreset.ROKID_768_1024.width * VideoPreset.ROKID_768_1024.height
+    val selectedPixels = width * height
+    if (selectedPixels <= baselinePixels) return null
+    return "Higher than 768 x 1024 can heat the glasses quickly and drain battery fast. For long streams, use a lower resolution, hide preview, and use external power."
 }
 
 private fun VideoPreset.defaultYoutubeBitrate(): Int =

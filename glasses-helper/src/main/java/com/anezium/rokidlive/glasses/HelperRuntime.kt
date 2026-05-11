@@ -13,6 +13,7 @@ import com.anezium.rokidlive.shared.NetworkAddresses
 import com.anezium.rokidlive.shared.Protocol
 import com.anezium.rokidlive.shared.StatusMessage
 import com.anezium.rokidlive.shared.StatusType
+import com.anezium.rokidlive.shared.StartStreamConfig
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -23,6 +24,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import java.net.InetSocketAddress
 import java.net.ServerSocket
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
 import kotlin.math.roundToInt
 
@@ -33,8 +35,12 @@ class HelperRuntime(context: Context) {
     val state = _state.asStateFlow()
 
     private val mediaSink = AtomicReference<MediaPacketSink?>(null)
+    private val transportLost = AtomicBoolean(true)
     private var reverseServerSocket: ServerSocket? = null
     private var batteryJob: Job? = null
+    private var cameraRetryJob: Job? = null
+    private var cameraRetryAttempts = 0
+    private var activeVideoConfig: StartStreamConfig? = null
     private val streamer = CameraH264Streamer(
         context = appContext,
         packetSender = { mediaSink.get() ?: error("Media socket not connected") },
@@ -51,9 +57,19 @@ class HelperRuntime(context: Context) {
                 )
             )
         },
+        onRunning = {
+            handleCameraRunning()
+        },
         onError = { message, throwable ->
-            _state.value = _state.value.copy(error = throwable?.message ?: message, streamState = "Error")
-            sendStatus(StatusMessage(StatusType.ERROR, message, networkInfo = NetworkAddresses.describeIpv4Addresses()))
+            if (message.isRecoverableCameraError()) {
+                handleCameraInterrupted(message, throwable)
+            } else {
+                _state.value = _state.value.copy(error = throwable?.message ?: message, streamState = "Error")
+                sendStatus(StatusMessage(StatusType.ERROR, message, networkInfo = NetworkAddresses.describeIpv4Addresses()))
+            }
+        },
+        onTransportLost = { message, throwable ->
+            handleTransportLost(message, throwable)
         }
     )
     private val audioStreamer = GlassesAacAudioStreamer(
@@ -65,6 +81,9 @@ class HelperRuntime(context: Context) {
         onError = { message, throwable ->
             _state.value = _state.value.copy(error = throwable?.message ?: message)
             sendStatus(StatusMessage(StatusType.ERROR, message, networkInfo = NetworkAddresses.describeIpv4Addresses()))
+        },
+        onTransportLost = { message, throwable ->
+            handleTransportLost(message, throwable)
         }
     )
 
@@ -155,6 +174,9 @@ class HelperRuntime(context: Context) {
                     error = ""
                 )
                 mediaSink.set(client)
+                transportLost.set(false)
+                activeVideoConfig = message.config
+                cameraRetryAttempts = 0
                 sendStatus(
                     StatusMessage(
                         StatusType.STARTED,
@@ -209,6 +231,9 @@ class HelperRuntime(context: Context) {
                 if (token != message.config.token) error("Reverse media token mismatch")
                 val sink = ReverseSocketSink(socket)
                 mediaSink.set(sink)
+                transportLost.set(false)
+                activeVideoConfig = message.config.asLoopbackStartConfig()
+                cameraRetryAttempts = 0
                 _state.value = _state.value.copy(
                     streamState = "Streaming",
                     phoneEndpoint = sink.endpoint,
@@ -222,7 +247,7 @@ class HelperRuntime(context: Context) {
                         reversePort = port
                     )
                 )
-                streamer.start(message.config.asLoopbackStartConfig())
+                streamer.start(activeVideoConfig ?: message.config.asLoopbackStartConfig())
                 audioStreamer.start()
             }.onFailure {
                 _state.value = _state.value.copy(streamState = "Error", error = it.message ?: "Reverse start failed")
@@ -239,6 +264,11 @@ class HelperRuntime(context: Context) {
     }
 
     private fun stopStreaming(sendStatus: Boolean) {
+        transportLost.set(true)
+        cameraRetryJob?.cancel()
+        cameraRetryJob = null
+        cameraRetryAttempts = 0
+        activeVideoConfig = null
         runCatching { audioStreamer.stop() }
         runCatching { streamer.stop() }
         runCatching { reverseServerSocket?.close() }
@@ -258,6 +288,75 @@ class HelperRuntime(context: Context) {
         _state.value = _state.value.copy(streamState = "Idle", phoneEndpoint = "")
         if (sendStatus) {
             sendStatus(StatusMessage(StatusType.STOPPED, "Stopped", networkInfo = NetworkAddresses.describeIpv4Addresses()))
+        }
+    }
+
+    private fun handleTransportLost(message: String, throwable: Throwable?) {
+        if (!transportLost.compareAndSet(false, true)) return
+        scope.launch {
+            stopStreaming(sendStatus = false)
+            val detail = throwable?.message?.takeIf { it.isNotBlank() }
+            val statusMessage = if (detail != null) "$message: $detail" else message
+            _state.value = _state.value.copy(streamState = "Error", error = statusMessage)
+            sendStatus(
+                StatusMessage(
+                    StatusType.ERROR,
+                    statusMessage,
+                    networkInfo = NetworkAddresses.describeIpv4Addresses()
+                )
+            )
+        }
+    }
+
+    private fun handleCameraRunning() {
+        cameraRetryAttempts = 0
+        cameraRetryJob?.cancel()
+        cameraRetryJob = null
+        _state.value = _state.value.copy(streamState = "Streaming", error = "")
+        sendStatus(
+            StatusMessage(
+                StatusType.STARTED,
+                "Camera streaming",
+                networkInfo = NetworkAddresses.describeIpv4Addresses()
+            )
+        )
+    }
+
+    private fun handleCameraInterrupted(message: String, throwable: Throwable?) {
+        if (transportLost.get()) return
+        val config = activeVideoConfig
+        if (config == null || mediaSink.get() == null) {
+            val detail = throwable?.message?.takeIf { it.isNotBlank() }
+            val statusMessage = if (detail != null) "$message: $detail" else message
+            _state.value = _state.value.copy(streamState = "Error", error = statusMessage)
+            sendStatus(StatusMessage(StatusType.ERROR, statusMessage, networkInfo = NetworkAddresses.describeIpv4Addresses()))
+            return
+        }
+        if (cameraRetryJob?.isActive == true) return
+        val nextAttempt = cameraRetryAttempts + 1
+        if (nextAttempt > CAMERA_RETRY_MAX_ATTEMPTS) {
+            val statusMessage = "Camera recovery failed after $CAMERA_RETRY_MAX_ATTEMPTS attempts. Rokid system camera may still be active."
+            _state.value = _state.value.copy(streamState = "Error", error = statusMessage)
+            sendStatus(StatusMessage(StatusType.ERROR, statusMessage, networkInfo = NetworkAddresses.describeIpv4Addresses()))
+            return
+        }
+        cameraRetryAttempts = nextAttempt
+        val reason = throwable?.message?.takeIf { it.isNotBlank() } ?: message
+        val waitingMessage = "Camera interrupted: retry $nextAttempt/$CAMERA_RETRY_MAX_ATTEMPTS in ${CAMERA_RETRY_DELAY_MS / 1000}s ($reason)"
+        _state.value = _state.value.copy(streamState = "Camera retry $nextAttempt/$CAMERA_RETRY_MAX_ATTEMPTS", error = waitingMessage)
+        sendStatus(StatusMessage(StatusType.STATS, waitingMessage, networkInfo = NetworkAddresses.describeIpv4Addresses()))
+        cameraRetryJob = scope.launch {
+            delay(CAMERA_RETRY_DELAY_MS)
+            if (transportLost.get() || mediaSink.get() == null || activeVideoConfig == null) return@launch
+            val retryMessage = "Retrying camera $nextAttempt/$CAMERA_RETRY_MAX_ATTEMPTS"
+            _state.value = _state.value.copy(streamState = retryMessage, error = "")
+            sendStatus(StatusMessage(StatusType.STATS, retryMessage, networkInfo = NetworkAddresses.describeIpv4Addresses()))
+            runCatching {
+                streamer.start(config)
+            }.onFailure {
+                cameraRetryJob = null
+                handleCameraInterrupted("Camera retry failed", it)
+            }
         }
     }
 
@@ -285,5 +384,15 @@ class HelperRuntime(context: Context) {
             ?.getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY)
             ?.takeIf { it in 0..100 }
             ?: -1
+    }
+
+    private fun String.isRecoverableCameraError(): Boolean =
+        startsWith("Camera disconnected") ||
+            startsWith("Camera open error") ||
+            startsWith("Camera capture session configure failed")
+
+    companion object {
+        private const val CAMERA_RETRY_MAX_ATTEMPTS = 5
+        private const val CAMERA_RETRY_DELAY_MS = 10_000L
     }
 }

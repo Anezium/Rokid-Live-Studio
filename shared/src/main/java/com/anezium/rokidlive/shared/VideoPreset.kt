@@ -13,6 +13,17 @@ enum class VideoPreset(
     val youtubeOutputHeight: Int = 0,
     val youtubeVideoBitrate: Int = 0
 ) {
+    ROKID_768_1024(
+        label = "768x1024",
+        width = 1024,
+        height = 768,
+        fps = 30,
+        videoBitrate = 1_600_000,
+        displayRotationDegrees = 270,
+        youtubeOutputWidth = 768,
+        youtubeOutputHeight = 1024,
+        youtubeVideoBitrate = 2_000_000
+    ),
     LIVE_720P_9_16(
         label = "720p 9:16 Live",
         width = 720,
@@ -115,7 +126,7 @@ enum class VideoPreset(
     )
 
     companion object {
-        val Default: VideoPreset = LIVE_720P_9_16
+        val Default: VideoPreset = ROKID_768_1024
 
         val Visible: List<VideoPreset> get() = entries.filter { it.visibleInUi }
 
