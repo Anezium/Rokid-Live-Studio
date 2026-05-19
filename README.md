@@ -15,6 +15,12 @@
 
 Android/Kotlin app for streaming your Rokid Glasses camera and microphone from your phone to YouTube or Twitch.
 
+<p align="center">
+  <a href="https://ko-fi.com/M8R61ZTXMI" target="_blank">
+    <img height="36" style="border:0px;height:36px;" src="https://storage.ko-fi.com/cdn/kofi4.png?v=6" border="0" alt="Buy Me a Coffee at ko-fi.com" />
+  </a>
+</p>
+
 The glasses helper keeps the glasses side as light as possible: it opens the Wi-Fi Direct group, captures the glasses camera/mic, and sends the media to the phone. The phone does the heavier work: preview, rotation/mirror, encoding, RTMP/RTMPS publishing, YouTube/Twitch API calls, and chat polling.
 
 With OAuth mode, Rokid Live Studio can also read YouTube or Twitch chat on the phone and render chat messages inside the glasses helper overlay.
