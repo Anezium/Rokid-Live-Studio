@@ -316,6 +316,7 @@ class CxrPhoneController(
             val intent = Intent(MEDIA_SERVICE_ACTION)
                 .setPackage(GLOBAL_AI_APP_PACKAGE)
                 .putExtra(AUTH_TOKEN_EXTRA, authToken)
+                .putExtra(AUTH_PACKAGE_EXTRA, context.applicationContext.packageName)
             context.applicationContext.bindService(intent, connection, Context.BIND_AUTO_CREATE)
         }.getOrElse {
             onError("Reflection bind failed", it)
@@ -381,5 +382,6 @@ class CxrPhoneController(
         private const val AUTH_ACTION = "com.rokid.sprite.aiapp.externalapp.AUTHORIZATION"
         private const val MEDIA_SERVICE_ACTION = "com.rokid.sprite.aiapp.externalapp.MEDIA_STREAM_SERVICE"
         private const val AUTH_TOKEN_EXTRA = "auth_token"
+        private const val AUTH_PACKAGE_EXTRA = "auth_package"
     }
 }
