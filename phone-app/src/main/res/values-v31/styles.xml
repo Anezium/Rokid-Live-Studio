@@ -6,5 +6,8 @@
         <item name="android:statusBarColor">@color/rokid_live_splash_background</item>
         <item name="android:navigationBarColor">@color/rokid_live_splash_background</item>
         <item name="android:colorAccent">#5CF018</item>
+        <item name="android:windowSplashScreenBackground">@color/rokid_live_splash_background</item>
+        <item name="android:windowSplashScreenAnimatedIcon">@drawable/ic_splash_logo</item>
+        <item name="android:windowSplashScreenIconBackgroundColor">@android:color/transparent</item>
     </style>
 </resources>
