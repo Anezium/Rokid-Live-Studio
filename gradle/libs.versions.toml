@@ -28,8 +28,8 @@ androidx-camera-view = { group = "androidx.camera", name = "camera-view", versio
 kotlinx-coroutines-android = { group = "org.jetbrains.kotlinx", name = "kotlinx-coroutines-android", version.ref = "coroutines" }
 play-services-auth = { group = "com.google.android.gms", name = "play-services-auth", version.ref = "playServicesAuth" }
 okhttp = { group = "com.squareup.okhttp3", name = "okhttp", version.ref = "okhttp" }
-rokid-client-l = { group = "com.rokid.cxr", name = "client-l", version = "1.0.1" }
-rokid-service-bridge = { group = "com.rokid.cxr", name = "cxr-service-bridge", version = "1.0-20260212.103714-88" }
+rokid-client-l = { group = "com.rokid.cxr", name = "client-l", version = "1.0.3" }
+rokid-service-bridge = { group = "com.rokid.cxr", name = "cxr-service-bridge", version = "1.0-20260522.063600-105" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }

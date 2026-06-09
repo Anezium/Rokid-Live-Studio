@@ -24,6 +24,7 @@ import com.rokid.cxr.link.callbacks.ICXRLinkCbk
 import com.rokid.cxr.link.callbacks.ICustomCmdCbk
 import com.rokid.cxr.link.callbacks.IGlassAppCbk
 import com.rokid.cxr.link.utils.CxrDefs
+import com.rokid.cxr.link.utils.GlassInfo
 import com.rokid.sprite.aiapp.externalapp.auth.AuthResult
 import com.rokid.sprite.aiapp.externalapp.auth.AuthorizationHelper
 import java.io.File
@@ -61,6 +62,9 @@ class CxrPhoneController(
 
         override fun onGlassAiAssistStart() = Unit
         override fun onGlassAiAssistStop() = Unit
+        override fun onGlassDeviceInfo(deviceInfo: GlassInfo) = Unit
+        override fun onGlassWearingStatus(wearing: Boolean) = Unit
+        override fun onGlassAiInterrupt(interruptWake: Boolean) = Unit
     }
 
     private val commandCallback = object : ICustomCmdCbk {
@@ -126,7 +130,7 @@ class CxrPhoneController(
     }
 
     fun handleAuthorizationResult(resultCode: Int, data: Intent?) {
-        val result = AuthorizationHelper.INSTANCE.parseAuthorizationResult(resultCode, data)
+        val result = AuthorizationHelper.parseAuthorizationResult(resultCode, data)
         when (result) {
             is AuthResult.AuthSuccess -> {
                 token = result.token
@@ -266,7 +270,7 @@ class CxrPhoneController(
             write("json")
             write(raw)
         }
-        val result = link?.sendCustomCmd(Protocol.CONTROL_CHANNEL, caps.serialize())
+        val result = link?.sendCustomCmd(Protocol.CONTROL_CHANNEL, caps)
         Log.d(TAG, "sendControl ${message.type}: $result")
         onLog("Sent ${message.type}")
     }

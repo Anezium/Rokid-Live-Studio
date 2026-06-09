@@ -29,6 +29,7 @@ class CxrBridgeController(
         }
 
         override fun onARTCStatus(health: Float, reset: Boolean) = Unit
+        override fun onAudioNoise(noise: Float) = Unit
         override fun onRokidAccountChanged(account: String?) = Unit
     }
 
