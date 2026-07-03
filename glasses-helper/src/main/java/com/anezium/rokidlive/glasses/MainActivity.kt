@@ -99,7 +99,9 @@ private fun HelperScreen(state: HelperUiState) {
                     nowMs = nowMs,
                     fontSizeSp = state.chatFontSizeSp,
                     maxMessages = state.chatMaxMessages,
-                    modifier = Modifier.align(Alignment.BottomCenter)
+                    modifier = Modifier
+                        .align(Alignment.BottomCenter)
+                        .padding(bottom = state.chatBottomOffsetDp.dp)
                 )
             }
         }

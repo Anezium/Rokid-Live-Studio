@@ -123,7 +123,11 @@ class HelperRuntime(context: Context) {
             ControlMessage.StopStream -> stopStreaming(sendStatus = true)
             is ControlMessage.SetBitrate -> streamer.setBitrate(message.videoBitrate)
             is ControlMessage.SetChatMessages -> setChatMessages(message.messages)
-            is ControlMessage.SetChatStyle -> setChatStyle(message.fontSizeSp, message.maxMessages)
+            is ControlMessage.SetChatStyle -> setChatStyle(
+                message.fontSizeSp,
+                message.maxMessages,
+                message.bottomOffsetDp
+            )
             ControlMessage.RequestKeyframe -> streamer.requestKeyFrame()
             is ControlMessage.Ping -> sendStatus(StatusMessage(StatusType.PONG, message.nonce))
         }
@@ -136,11 +140,16 @@ class HelperRuntime(context: Context) {
         )
     }
 
-    private fun setChatStyle(fontSizeSp: Int, maxMessages: Int) {
+    private fun setChatStyle(fontSizeSp: Int, maxMessages: Int, bottomOffsetDp: Int) {
         val normalizedFontSize = fontSizeSp.coerceAtLeast(1)
         val normalizedMaxMessages = maxMessages.coerceIn(0, Protocol.MAX_CHAT_MESSAGE_COUNT)
+        val normalizedBottomOffset = bottomOffsetDp.coerceIn(
+            Protocol.MIN_CHAT_BOTTOM_OFFSET_DP,
+            Protocol.MAX_CHAT_BOTTOM_OFFSET_DP
+        )
         _state.value = _state.value.copy(
             chatFontSizeSp = normalizedFontSize,
+            chatBottomOffsetDp = normalizedBottomOffset,
             chatMaxMessages = normalizedMaxMessages,
             chatMessages = _state.value.chatMessages.takeLast(normalizedMaxMessages)
         )

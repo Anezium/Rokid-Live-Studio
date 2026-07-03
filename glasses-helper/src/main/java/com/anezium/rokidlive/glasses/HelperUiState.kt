@@ -15,6 +15,7 @@ data class HelperUiState(
     val error: String = "",
     val batteryPercent: Int = -1,
     val chatFontSizeSp: Int = Protocol.DEFAULT_CHAT_FONT_SIZE_SP,
+    val chatBottomOffsetDp: Int = Protocol.DEFAULT_CHAT_BOTTOM_OFFSET_DP,
     val chatMaxMessages: Int = Protocol.DEFAULT_CHAT_MAX_MESSAGES,
     val chatMessages: List<ChatOverlayMessage> = emptyList()
 )

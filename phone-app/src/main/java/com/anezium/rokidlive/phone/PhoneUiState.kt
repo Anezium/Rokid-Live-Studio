@@ -49,6 +49,7 @@ data class PhoneUiState(
     val youtubeStatus: String = "",
     val youtubeBytesSent: Long = 0,
     val youtubeRtmpDiagnostics: RtmpDiagnostics = RtmpDiagnostics(),
+    val chatBottomOffsetDp: Int = Protocol.DEFAULT_CHAT_BOTTOM_OFFSET_DP,
     val twitchStreamKey: String = "",
     val twitchTitle: String = "",
     val twitchCategoryId: String = TwitchCategory.Default.id,

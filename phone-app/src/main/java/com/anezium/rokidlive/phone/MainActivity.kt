@@ -190,6 +190,10 @@ class MainActivity : ComponentActivity() {
                 PREF_YOUTUBE_CHAT_MAX_MESSAGES,
                 Protocol.DEFAULT_CHAT_MAX_MESSAGES
             ).coerceIn(0, Protocol.MAX_CHAT_MESSAGE_COUNT),
+            chatBottomOffsetDp = preferences.getInt(
+                PREF_CHAT_BOTTOM_OFFSET_DP,
+                Protocol.DEFAULT_CHAT_BOTTOM_OFFSET_DP
+            ).coerceIn(Protocol.MIN_CHAT_BOTTOM_OFFSET_DP, Protocol.MAX_CHAT_BOTTOM_OFFSET_DP),
             twitchStreamKey = secretStore.getString(PREF_TWITCH_STREAM_KEY),
             twitchTitle = preferences.getString(PREF_TWITCH_TITLE, defaultTwitchTitle()).orEmpty(),
             twitchCategoryId = preferences.getString(PREF_TWITCH_CATEGORY_ID, TwitchCategory.Default.id).orEmpty()
@@ -348,6 +352,7 @@ class MainActivity : ComponentActivity() {
                 onYoutubeChatEnabledChange = { setYoutubeChatEnabled(it) },
                 onYoutubeChatFontSizeSelected = { setYoutubeChatFontSize(it) },
                 onYoutubeChatMaxMessagesSelected = { setYoutubeChatMaxMessages(it) },
+                onChatBottomOffsetSelected = { setChatBottomOffset(it) },
                 onConnectYoutube = { connectYoutube() },
                 onStartYoutubeDeviceAuth = { startYoutubeDeviceAuth() },
                 onOpenGoogleCloudDocs = { openGoogleCloudDocs() },
@@ -858,11 +863,31 @@ class MainActivity : ComponentActivity() {
         runCatching { cxr.sendChatMessages(nextMessages) }
     }
 
+    private fun setChatBottomOffset(offsetDp: Int) {
+        val normalized = offsetDp.coerceIn(
+            Protocol.MIN_CHAT_BOTTOM_OFFSET_DP,
+            Protocol.MAX_CHAT_BOTTOM_OFFSET_DP
+        )
+        preferences.edit().putInt(PREF_CHAT_BOTTOM_OFFSET_DP, normalized).apply()
+        uiState = uiState.copy(
+            chatBottomOffsetDp = normalized,
+            youtubeChatStatus = "Helper chat position: ${normalized}dp",
+            twitchChatStatus = "Helper chat position: ${normalized}dp"
+        )
+        when {
+            uiState.youtubeLive -> sendYoutubeChatStyle()
+            uiState.twitchLive -> sendTwitchChatStyle()
+            uiState.youtubeChatEnabled -> sendYoutubeChatStyle()
+            uiState.twitchChatEnabled -> sendTwitchChatStyle()
+        }
+    }
+
     private fun sendYoutubeChatStyle() {
         runCatching {
             cxr.sendChatStyle(
                 fontSizeSp = uiState.youtubeChatFontSizeSp,
-                maxMessages = uiState.youtubeChatMaxMessages
+                maxMessages = uiState.youtubeChatMaxMessages,
+                bottomOffsetDp = uiState.chatBottomOffsetDp
             )
         }
     }
@@ -949,7 +974,8 @@ class MainActivity : ComponentActivity() {
         runCatching {
             cxr.sendChatStyle(
                 fontSizeSp = uiState.twitchChatFontSizeSp,
-                maxMessages = uiState.twitchChatMaxMessages
+                maxMessages = uiState.twitchChatMaxMessages,
+                bottomOffsetDp = uiState.chatBottomOffsetDp
             )
         }
     }
@@ -2251,6 +2277,7 @@ class MainActivity : ComponentActivity() {
         private const val PREF_YOUTUBE_CHAT_ENABLED = "youtube_chat_enabled"
         private const val PREF_YOUTUBE_CHAT_FONT_SIZE_SP = "youtube_chat_font_size_sp"
         private const val PREF_YOUTUBE_CHAT_MAX_MESSAGES = "youtube_chat_max_messages"
+        private const val PREF_CHAT_BOTTOM_OFFSET_DP = "chat_bottom_offset_dp"
         private const val PREF_TWITCH_STREAM_KEY = "twitch_stream_key"
         private const val PREF_TWITCH_TITLE = "twitch_title"
         private const val PREF_TWITCH_CATEGORY_ID = "twitch_category_id"
@@ -2347,6 +2374,7 @@ private val YoutubeBitrateOptions = listOf(
     6_000_000,
     8_000_000
 )
+private val ChatBottomOffsetOptions = listOf(0, 20, 40, 60, 80, 120, 160, 200)
 @Composable
 private fun PhoneScreen(
     state: PhoneUiState,
@@ -2367,6 +2395,7 @@ private fun PhoneScreen(
     onYoutubeChatEnabledChange: (Boolean) -> Unit,
     onYoutubeChatFontSizeSelected: (Int) -> Unit,
     onYoutubeChatMaxMessagesSelected: (Int) -> Unit,
+    onChatBottomOffsetSelected: (Int) -> Unit,
     onConnectYoutube: () -> Unit,
     onStartYoutubeDeviceAuth: () -> Unit,
     onOpenGoogleCloudDocs: () -> Unit,
@@ -2456,6 +2485,7 @@ private fun PhoneScreen(
                     onYoutubeChatEnabledChange = onYoutubeChatEnabledChange,
                     onYoutubeChatFontSizeSelected = onYoutubeChatFontSizeSelected,
                     onYoutubeChatMaxMessagesSelected = onYoutubeChatMaxMessagesSelected,
+                    onChatBottomOffsetSelected = onChatBottomOffsetSelected,
                     onConnectYoutube = onConnectYoutube,
                     onStartYoutubeDeviceAuth = onStartYoutubeDeviceAuth,
                     onOpenGoogleCloudDocs = onOpenGoogleCloudDocs,
@@ -2483,6 +2513,7 @@ private fun PhoneScreen(
                     onTwitchChatEnabledChange = onTwitchChatEnabledChange,
                     onTwitchChatFontSizeSelected = onTwitchChatFontSizeSelected,
                     onTwitchChatMaxMessagesSelected = onTwitchChatMaxMessagesSelected,
+                    onChatBottomOffsetSelected = onChatBottomOffsetSelected,
                     onStartTwitchDeviceAuth = onStartTwitchDeviceAuth,
                     onOpenTwitchDocs = onOpenTwitchDocs,
                     onDisconnectTwitch = onDisconnectTwitch,
@@ -2784,6 +2815,7 @@ private fun YoutubeStudioScreen(
     onYoutubeChatEnabledChange: (Boolean) -> Unit,
     onYoutubeChatFontSizeSelected: (Int) -> Unit,
     onYoutubeChatMaxMessagesSelected: (Int) -> Unit,
+    onChatBottomOffsetSelected: (Int) -> Unit,
     onConnectYoutube: () -> Unit,
     onStartYoutubeDeviceAuth: () -> Unit,
     onOpenGoogleCloudDocs: () -> Unit,
@@ -3008,7 +3040,8 @@ private fun YoutubeStudioScreen(
                     oauthMode = oauthMode,
                     onEnabledChange = onYoutubeChatEnabledChange,
                     onFontSizeSelected = onYoutubeChatFontSizeSelected,
-                    onMaxMessagesSelected = onYoutubeChatMaxMessagesSelected
+                    onMaxMessagesSelected = onYoutubeChatMaxMessagesSelected,
+                    onBottomOffsetSelected = onChatBottomOffsetSelected
                 )
             }
         }
@@ -3082,6 +3115,7 @@ private fun TwitchStudioScreen(
     onTwitchChatEnabledChange: (Boolean) -> Unit,
     onTwitchChatFontSizeSelected: (Int) -> Unit,
     onTwitchChatMaxMessagesSelected: (Int) -> Unit,
+    onChatBottomOffsetSelected: (Int) -> Unit,
     onStartTwitchDeviceAuth: () -> Unit,
     onOpenTwitchDocs: () -> Unit,
     onDisconnectTwitch: () -> Unit,
@@ -3303,7 +3337,8 @@ private fun TwitchStudioScreen(
                     oauthMode = oauthMode,
                     onEnabledChange = onTwitchChatEnabledChange,
                     onFontSizeSelected = onTwitchChatFontSizeSelected,
-                    onMaxMessagesSelected = onTwitchChatMaxMessagesSelected
+                    onMaxMessagesSelected = onTwitchChatMaxMessagesSelected,
+                    onBottomOffsetSelected = onChatBottomOffsetSelected
                 )
             }
         }
@@ -4480,7 +4515,8 @@ private fun YoutubeChatCard(
     oauthMode: Boolean,
     onEnabledChange: (Boolean) -> Unit,
     onFontSizeSelected: (Int) -> Unit,
-    onMaxMessagesSelected: (Int) -> Unit
+    onMaxMessagesSelected: (Int) -> Unit,
+    onBottomOffsetSelected: (Int) -> Unit
 ) {
     val enabled = oauthMode && state.youtubeConnected
     StudioCard(enabled = enabled) {
@@ -4555,6 +4591,19 @@ private fun YoutubeChatCard(
                         onMaxMessagesSelected(Protocol.DEFAULT_CHAT_MAX_MESSAGES)
                     }
                 )
+                ChatBottomOffsetStepperRow(
+                    selected = state.chatBottomOffsetDp,
+                    enabled = enabled,
+                    onDecrease = {
+                        onBottomOffsetSelected(previousChatBottomOffset(state.chatBottomOffsetDp))
+                    },
+                    onIncrease = {
+                        onBottomOffsetSelected(nextChatBottomOffset(state.chatBottomOffsetDp))
+                    },
+                    onReset = {
+                        onBottomOffsetSelected(Protocol.DEFAULT_CHAT_BOTTOM_OFFSET_DP)
+                    }
+                )
             }
 
             if (state.youtubeChatMessages.isNotEmpty()) {
@@ -4581,7 +4630,8 @@ private fun TwitchChatCard(
     oauthMode: Boolean,
     onEnabledChange: (Boolean) -> Unit,
     onFontSizeSelected: (Int) -> Unit,
-    onMaxMessagesSelected: (Int) -> Unit
+    onMaxMessagesSelected: (Int) -> Unit,
+    onBottomOffsetSelected: (Int) -> Unit
 ) {
     val enabled = oauthMode && state.twitchConnected
     StudioCard(enabled = enabled) {
@@ -4654,6 +4704,19 @@ private fun TwitchChatCard(
                     },
                     onReset = {
                         onMaxMessagesSelected(Protocol.DEFAULT_CHAT_MAX_MESSAGES)
+                    }
+                )
+                ChatBottomOffsetStepperRow(
+                    selected = state.chatBottomOffsetDp,
+                    enabled = enabled,
+                    onDecrease = {
+                        onBottomOffsetSelected(previousChatBottomOffset(state.chatBottomOffsetDp))
+                    },
+                    onIncrease = {
+                        onBottomOffsetSelected(nextChatBottomOffset(state.chatBottomOffsetDp))
+                    },
+                    onReset = {
+                        onBottomOffsetSelected(Protocol.DEFAULT_CHAT_BOTTOM_OFFSET_DP)
                     }
                 )
             }
@@ -4793,6 +4856,64 @@ private fun ChatMessageStepperRow(
 }
 
 @Composable
+private fun ChatBottomOffsetStepperRow(
+    selected: Int,
+    enabled: Boolean,
+    onDecrease: () -> Unit,
+    onIncrease: () -> Unit,
+    onReset: () -> Unit
+) {
+    Column(verticalArrangement = Arrangement.spacedBy(7.dp)) {
+        Text(
+            "Chat position (bottom offset)",
+            color = if (enabled) StudioText else StudioMuted,
+            fontSize = 12.sp,
+            fontWeight = FontWeight.Bold
+        )
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            ChatMiniButton(
+                text = "-",
+                enabled = enabled && selected > Protocol.MIN_CHAT_BOTTOM_OFFSET_DP,
+                onClick = onDecrease,
+                modifier = Modifier.weight(0.75f)
+            )
+            Box(
+                modifier = Modifier
+                    .weight(1.2f)
+                    .height(38.dp)
+                    .clip(RoundedCornerShape(10.dp))
+                    .background(Color(0xFF0D1110))
+                    .border(1.dp, StudioBorder, RoundedCornerShape(10.dp)),
+                contentAlignment = Alignment.Center
+            ) {
+                Text(
+                    "${selected}dp",
+                    color = if (enabled) StudioText else StudioMuted,
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.Bold
+                )
+            }
+            ChatMiniButton(
+                text = "+",
+                enabled = enabled && selected < Protocol.MAX_CHAT_BOTTOM_OFFSET_DP,
+                onClick = onIncrease,
+                modifier = Modifier.weight(0.75f)
+            )
+            ChatMiniButton(
+                text = "Reset",
+                enabled = enabled && selected != Protocol.DEFAULT_CHAT_BOTTOM_OFFSET_DP,
+                onClick = onReset,
+                modifier = Modifier.weight(1.25f)
+            )
+        }
+    }
+}
+
+@Composable
 private fun ChatMiniButton(
     text: String,
     enabled: Boolean,
@@ -4818,6 +4939,12 @@ private fun ChatMiniButton(
         )
     }
 }
+
+private fun previousChatBottomOffset(selected: Int): Int =
+    ChatBottomOffsetOptions.lastOrNull { it < selected } ?: Protocol.MIN_CHAT_BOTTOM_OFFSET_DP
+
+private fun nextChatBottomOffset(selected: Int): Int =
+    ChatBottomOffsetOptions.firstOrNull { it > selected } ?: Protocol.MAX_CHAT_BOTTOM_OFFSET_DP
 
 @Composable
 private fun PrivacySelector(

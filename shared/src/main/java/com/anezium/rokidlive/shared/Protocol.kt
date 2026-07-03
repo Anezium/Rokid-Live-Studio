@@ -16,6 +16,9 @@ object Protocol {
     const val DEFAULT_VIDEO_BITRATE = 2_000_000
     const val DEFAULT_IFRAME_INTERVAL_SECONDS = 2
     const val DEFAULT_CHAT_FONT_SIZE_SP = 17
+    const val DEFAULT_CHAT_BOTTOM_OFFSET_DP = 0
+    const val MIN_CHAT_BOTTOM_OFFSET_DP = 0
+    const val MAX_CHAT_BOTTOM_OFFSET_DP = 200
     const val DEFAULT_CHAT_MAX_MESSAGES = 5
     const val MAX_CHAT_MESSAGE_COUNT = 20
 }
@@ -124,7 +127,8 @@ sealed interface ControlMessage {
 
     data class SetChatStyle(
         val fontSizeSp: Int,
-        val maxMessages: Int = Protocol.DEFAULT_CHAT_MAX_MESSAGES
+        val maxMessages: Int = Protocol.DEFAULT_CHAT_MAX_MESSAGES,
+        val bottomOffsetDp: Int = Protocol.DEFAULT_CHAT_BOTTOM_OFFSET_DP
     ) : ControlMessage {
         override val type = ControlType.SET_CHAT_STYLE
     }
@@ -199,6 +203,7 @@ object JsonProtocol {
             is ControlMessage.SetChatStyle -> json
                 .put("fontSizeSp", message.fontSizeSp.sanitizeChatFontSize())
                 .put("maxMessages", message.maxMessages.sanitizeChatMaxMessages())
+                .put("bottomOffsetDp", message.bottomOffsetDp.sanitizeChatBottomOffset())
             is ControlMessage.Ping -> json.put("nonce", message.nonce)
             ControlMessage.RequestKeyframe,
             ControlMessage.StopP2p,
@@ -266,7 +271,11 @@ object JsonProtocol {
             )
             ControlType.SET_CHAT_STYLE -> ControlMessage.SetChatStyle(
                 fontSizeSp = json.optInt("fontSizeSp", Protocol.DEFAULT_CHAT_FONT_SIZE_SP).sanitizeChatFontSize(),
-                maxMessages = json.optInt("maxMessages", Protocol.DEFAULT_CHAT_MAX_MESSAGES).sanitizeChatMaxMessages()
+                maxMessages = json.optInt("maxMessages", Protocol.DEFAULT_CHAT_MAX_MESSAGES).sanitizeChatMaxMessages(),
+                bottomOffsetDp = json.optInt(
+                    "bottomOffsetDp",
+                    Protocol.DEFAULT_CHAT_BOTTOM_OFFSET_DP
+                ).sanitizeChatBottomOffset()
             )
             ControlType.REQUEST_KEYFRAME -> ControlMessage.RequestKeyframe
             ControlType.PING -> ControlMessage.Ping(json.optString("nonce"))
@@ -317,4 +326,7 @@ object JsonProtocol {
 
     private fun Int.sanitizeChatMaxMessages(): Int =
         coerceIn(0, Protocol.MAX_CHAT_MESSAGE_COUNT)
+
+    private fun Int.sanitizeChatBottomOffset(): Int =
+        coerceIn(Protocol.MIN_CHAT_BOTTOM_OFFSET_DP, Protocol.MAX_CHAT_BOTTOM_OFFSET_DP)
 }

@@ -260,8 +260,8 @@ class CxrPhoneController(
         sendControl(ControlMessage.SetChatMessages(messages))
     }
 
-    fun sendChatStyle(fontSizeSp: Int, maxMessages: Int) {
-        sendControl(ControlMessage.SetChatStyle(fontSizeSp, maxMessages))
+    fun sendChatStyle(fontSizeSp: Int, maxMessages: Int, bottomOffsetDp: Int) {
+        sendControl(ControlMessage.SetChatStyle(fontSizeSp, maxMessages, bottomOffsetDp))
     }
 
     private fun sendControl(message: ControlMessage) {
