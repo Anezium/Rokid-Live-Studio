@@ -123,6 +123,7 @@ class MainActivity : ComponentActivity() {
     private lateinit var twitchPublisher: YoutubeRtmpPublisher
     private lateinit var twitchDeviceAuthApi: TwitchDeviceAuthorizationApi
     private lateinit var twitchApi: TwitchApi
+    private lateinit var customPublisher: YoutubeRtmpPublisher
     private lateinit var updateManager: GitHubUpdateManager
     private lateinit var preferences: SharedPreferences
     private lateinit var secretStore: SecretStore
@@ -136,6 +137,9 @@ class MainActivity : ComponentActivity() {
     private var twitchChatClient: TwitchChatClient? = null
     private var twitchChatStopRequested = false
     private var twitchVideoTranscoder: YoutubeVideoRotationTranscoder? = null
+    private var customChatClient: TwitchAnonymousChatClient? = null
+    private var customChatStopRequested = false
+    private var customVideoTranscoder: YoutubeVideoRotationTranscoder? = null
     private var youtubeDeviceAccessToken: String = ""
     private var youtubeDeviceRefreshToken: String = ""
     private var youtubeDeviceAccessTokenExpiresAtMs: Long = 0L
@@ -216,6 +220,19 @@ class MainActivity : ComponentActivity() {
             twitchChatMaxMessages = preferences.getInt(
                 PREF_TWITCH_CHAT_MAX_MESSAGES,
                 Protocol.DEFAULT_CHAT_MAX_MESSAGES
+            ).coerceIn(0, Protocol.MAX_CHAT_MESSAGE_COUNT),
+            customRtmpServerUrl = preferences.getString(PREF_CUSTOM_RTMP_SERVER_URL, "").orEmpty(),
+            customRtmpStreamKey = secretStore.getString(PREF_CUSTOM_RTMP_STREAM_KEY),
+            customVideoBitrateOverride = preferences.getInt(PREF_CUSTOM_VIDEO_BITRATE, 0),
+            customChatEnabled = preferences.getBoolean(PREF_CUSTOM_CHAT_ENABLED, false),
+            customChatChannel = preferences.getString(PREF_CUSTOM_CHAT_CHANNEL, "").orEmpty(),
+            customChatFontSizeSp = preferences.getInt(
+                PREF_CUSTOM_CHAT_FONT_SIZE_SP,
+                Protocol.DEFAULT_CHAT_FONT_SIZE_SP
+            ).coerceAtLeast(1),
+            customChatMaxMessages = preferences.getInt(
+                PREF_CUSTOM_CHAT_MAX_MESSAGES,
+                Protocol.DEFAULT_CHAT_MAX_MESSAGES
             ).coerceIn(0, Protocol.MAX_CHAT_MESSAGE_COUNT)
         )
         decoder = VideoPreviewDecoder(
@@ -260,6 +277,25 @@ class MainActivity : ComponentActivity() {
             },
             onDiagnostics = { diagnostics ->
                 onMain { uiState = uiState.copy(twitchRtmpDiagnostics = diagnostics) }
+            }
+        )
+        customPublisher = YoutubeRtmpPublisher(
+            platformName = "Custom RTMP",
+            onStatus = { status -> onMain { uiState = uiState.copy(customStatus = status, lastStatus = status) } },
+            onLiveChanged = { live -> onMain { uiState = uiState.copy(customLive = live) } },
+            onStats = { bytes -> onMain { uiState = uiState.copy(customBytesSent = bytes) } },
+            onError = { message, throwable -> onMain { setError(message, throwable) } },
+            networkBindingProvider = { youtubeNetworkSelector.select() },
+            onReady = {
+                onMain { uiState = uiState.copy(customStatus = "Custom RTMP stream is live", error = "") }
+            },
+            onVideoBackpressure = {
+                onMain {
+                    customVideoTranscoder?.requestKeyFrame() ?: cxr.requestKeyFrame()
+                }
+            },
+            onDiagnostics = { diagnostics ->
+                onMain { uiState = uiState.copy(customRtmpDiagnostics = diagnostics) }
             }
         )
         youtubeLiveApi = YoutubeLiveApi()
@@ -331,6 +367,7 @@ class MainActivity : ComponentActivity() {
             onError = { message, throwable -> onMain { setError(message, throwable) } }
         )
         uiState = uiState.copy(requiredRokidAppInstalled = cxr.isRequiredRokidAppInstalled(this))
+        startCustomChatIfPossible()
 
         setContent {
             PhoneScreen(
@@ -367,12 +404,21 @@ class MainActivity : ComponentActivity() {
                 onTwitchChatEnabledChange = { setTwitchChatEnabled(it) },
                 onTwitchChatFontSizeSelected = { setTwitchChatFontSize(it) },
                 onTwitchChatMaxMessagesSelected = { setTwitchChatMaxMessages(it) },
+                onCustomRtmpServerUrlChanged = { setCustomRtmpServerUrl(it) },
+                onCustomRtmpKeyChanged = { setCustomRtmpStreamKey(it) },
+                onCustomBitrateSelected = { selectCustomVideoBitrate(it) },
+                onCustomChatEnabledChange = { setCustomChatEnabled(it) },
+                onCustomChatChannelChanged = { setCustomChatChannel(it) },
+                onCustomChatFontSizeSelected = { setCustomChatFontSize(it) },
+                onCustomChatMaxMessagesSelected = { setCustomChatMaxMessages(it) },
                 onStartTwitchDeviceAuth = { startTwitchDeviceAuth() },
                 onOpenTwitchDocs = { openTwitchDocs() },
                 onDisconnectTwitch = { disconnectTwitch() },
                 onRefreshTwitchChannel = { refreshTwitchChannel() },
                 onStartTwitch = { startTwitchLive() },
                 onStopTwitch = { stopTwitchLive() },
+                onStartCustom = { startCustomLive() },
+                onStopCustom = { stopCustomLive() },
                 onPresetSelected = { selectPreset(it) },
                 onPreviewRotationSelected = { selectPreviewRotation(it) },
                 onStartYoutube = { startYoutubeLive() },
@@ -418,10 +464,13 @@ class MainActivity : ComponentActivity() {
         twitchDeviceAuthJob?.cancel()
         stopYoutubeChat(clearHelper = true)
         stopTwitchChat(clearHelper = true)
+        stopCustomChat(clearHelper = true)
         youtubeVideoTranscoder?.stop()
         twitchVideoTranscoder?.stop()
+        customVideoTranscoder?.stop()
         youtubePublisher.stop()
         twitchPublisher.stop()
+        customPublisher.stop()
         decoder.release()
         super.onDestroy()
     }
@@ -470,6 +519,7 @@ class MainActivity : ComponentActivity() {
         lastVideoConfig = payload
         youtubeVideoTranscoder?.configure(payload) ?: youtubePublisher.configureVideo(payload)
         twitchVideoTranscoder?.configure(payload) ?: twitchPublisher.configureVideo(payload)
+        customVideoTranscoder?.configure(payload) ?: customPublisher.configureVideo(payload)
     }
 
     private fun handleIncomingVideoFrame(payload: ByteArray, timestampUs: Long, keyFrame: Boolean) {
@@ -477,11 +527,14 @@ class MainActivity : ComponentActivity() {
             ?: youtubePublisher.publishVideoFrame(payload, timestampUs, keyFrame)
         twitchVideoTranscoder?.queueFrame(payload, timestampUs, keyFrame)
             ?: twitchPublisher.publishVideoFrame(payload, timestampUs, keyFrame)
+        customVideoTranscoder?.queueFrame(payload, timestampUs, keyFrame)
+            ?: customPublisher.publishVideoFrame(payload, timestampUs, keyFrame)
     }
 
     private fun handleIncomingAudioConfig(payload: ByteArray) {
         youtubePublisher.configureAudio(payload)
         twitchPublisher.configureAudio(payload)
+        customPublisher.configureAudio(payload)
         if (uiState.youtubeLive) {
             onMain {
                 if (uiState.youtubeLive) {
@@ -496,11 +549,19 @@ class MainActivity : ComponentActivity() {
                 }
             }
         }
+        if (uiState.customLive) {
+            onMain {
+                if (uiState.customLive) {
+                    uiState = uiState.copy(customStatus = "Rokid glasses mic ready")
+                }
+            }
+        }
     }
 
     private fun handleIncomingAudioFrame(payload: ByteArray, timestampUs: Long) {
         youtubePublisher.publishAudioFrame(payload, timestampUs)
         twitchPublisher.publishAudioFrame(payload, timestampUs)
+        customPublisher.publishAudioFrame(payload, timestampUs)
     }
 
     private fun startStream() {
@@ -597,6 +658,7 @@ class MainActivity : ComponentActivity() {
         cxr.sendStopP2p()
         stopYoutubeLive()
         stopTwitchLive()
+        stopCustomLive()
         reverseClient?.stop()
         p2pConnector?.stop()
         p2pConnector = null
@@ -609,7 +671,8 @@ class MainActivity : ComponentActivity() {
             p2pEndpoint = "",
             p2pStatus = "Stopped",
             youtubeLive = false,
-            twitchLive = false
+            twitchLive = false,
+            customLive = false
         )
     }
 
@@ -689,7 +752,7 @@ class MainActivity : ComponentActivity() {
                 p2pConnector = null
                 p2pAutoStream = false
                 uiState = uiState.copy(p2pRunning = false, p2pConnected = false, p2pStatus = reason)
-                if (!uiState.youtubeLive && !uiState.twitchLive) stopLiveKeepAlive()
+                if (!uiState.youtubeLive && !uiState.twitchLive && !uiState.customLive) stopLiveKeepAlive()
                 setError("Wi-Fi Direct failed: $reason", null)
             }
         )
@@ -717,13 +780,18 @@ class MainActivity : ComponentActivity() {
             uiState = uiState.copy(twitchStatus = "Stop Twitch before changing resolution")
             return
         }
+        if (uiState.customLive) {
+            uiState = uiState.copy(customStatus = "Stop Custom RTMP before changing resolution")
+            return
+        }
         if (uiState.selectedPreset == preset) return
         preferences.edit().putString(PREF_VIDEO_PRESET, preset.name).apply()
         uiState = uiState.copy(
             selectedPreset = preset,
             previewRotationDegrees = loadPreviewRotation(preset),
             youtubeStatus = "Preset: ${preset.label}",
-            twitchStatus = "Preset: ${preset.label}"
+            twitchStatus = "Preset: ${preset.label}",
+            customStatus = "Preset: ${preset.label}"
         )
         applySelectedPreset()
         if (uiState.youtubeLive) {
@@ -732,6 +800,10 @@ class MainActivity : ComponentActivity() {
         }
         if (uiState.twitchLive) {
             startOrUpdateTwitchVideoPipeline()
+            cxr.requestKeyFrame()
+        }
+        if (uiState.customLive) {
+            startOrUpdateCustomVideoPipeline()
             cxr.requestKeyFrame()
         }
     }
@@ -748,6 +820,10 @@ class MainActivity : ComponentActivity() {
         }
         if (uiState.twitchLive) {
             startOrUpdateTwitchVideoPipeline()
+            cxr.requestKeyFrame()
+        }
+        if (uiState.customLive) {
+            startOrUpdateCustomVideoPipeline()
             cxr.requestKeyFrame()
         }
     }
@@ -872,13 +948,16 @@ class MainActivity : ComponentActivity() {
         uiState = uiState.copy(
             chatBottomOffsetDp = normalized,
             youtubeChatStatus = "Helper chat position: ${normalized}dp",
-            twitchChatStatus = "Helper chat position: ${normalized}dp"
+            twitchChatStatus = "Helper chat position: ${normalized}dp",
+            customChatStatus = "Helper chat position: ${normalized}dp"
         )
         when {
             uiState.youtubeLive -> sendYoutubeChatStyle()
             uiState.twitchLive -> sendTwitchChatStyle()
+            uiState.customLive -> sendCustomChatStyle()
             uiState.youtubeChatEnabled -> sendYoutubeChatStyle()
             uiState.twitchChatEnabled -> sendTwitchChatStyle()
+            uiState.customChatEnabled -> sendCustomChatStyle()
         }
     }
 
@@ -975,6 +1054,98 @@ class MainActivity : ComponentActivity() {
             cxr.sendChatStyle(
                 fontSizeSp = uiState.twitchChatFontSizeSp,
                 maxMessages = uiState.twitchChatMaxMessages,
+                bottomOffsetDp = uiState.chatBottomOffsetDp
+            )
+        }
+    }
+
+    private fun setCustomRtmpServerUrl(serverUrl: String) {
+        preferences.edit().putString(PREF_CUSTOM_RTMP_SERVER_URL, serverUrl).apply()
+        uiState = uiState.copy(customRtmpServerUrl = serverUrl)
+    }
+
+    private fun setCustomRtmpStreamKey(streamKey: String) {
+        secretStore.putString(PREF_CUSTOM_RTMP_STREAM_KEY, streamKey)
+        uiState = uiState.copy(customRtmpStreamKey = streamKey)
+    }
+
+    private fun selectCustomVideoBitrate(bitrate: Int) {
+        val normalized = bitrate.takeIf { it > 0 } ?: 0
+        preferences.edit().putInt(PREF_CUSTOM_VIDEO_BITRATE, normalized).apply()
+        uiState = uiState.copy(
+            customVideoBitrateOverride = normalized,
+            customStatus = if (normalized > 0) {
+                "Custom RTMP bitrate: ${normalized.bitrateLabel()}"
+            } else {
+                "Custom RTMP bitrate: auto"
+            }
+        )
+    }
+
+    private fun setCustomChatEnabled(enabled: Boolean) {
+        preferences.edit().putBoolean(PREF_CUSTOM_CHAT_ENABLED, enabled).apply()
+        uiState = uiState.copy(
+            customChatEnabled = enabled,
+            customChatStatus = if (enabled) {
+                "Connecting anonymous Twitch chat..."
+            } else {
+                "Helper chat hidden"
+            },
+            customChatMessages = if (enabled) uiState.customChatMessages else emptyList()
+        )
+        if (enabled) {
+            sendCustomChatStyle()
+            startCustomChatIfPossible()
+        } else {
+            stopCustomChat(clearHelper = true)
+        }
+    }
+
+    private fun setCustomChatChannel(channel: String) {
+        preferences.edit().putString(PREF_CUSTOM_CHAT_CHANNEL, channel).apply()
+        val shouldRestart = customChatClient != null
+        if (shouldRestart) stopCustomChat(clearHelper = true)
+        uiState = uiState.copy(
+            customChatChannel = channel,
+            customChatStatus = if (channel.trim().removePrefix("#").trim().isBlank()) {
+                "Enter a Twitch channel name"
+            } else {
+                "Twitch chat channel: ${channel.trim().removePrefix("#").trim().lowercase()}"
+            }
+        )
+        if (uiState.customChatEnabled && channel.trim().removePrefix("#").trim().isNotBlank()) {
+            startCustomChatIfPossible()
+        }
+    }
+
+    private fun setCustomChatFontSize(fontSizeSp: Int) {
+        val normalized = fontSizeSp.coerceAtLeast(1)
+        preferences.edit().putInt(PREF_CUSTOM_CHAT_FONT_SIZE_SP, normalized).apply()
+        uiState = uiState.copy(
+            customChatFontSizeSp = normalized,
+            customChatStatus = "Helper chat font: ${normalized}sp"
+        )
+        sendCustomChatStyle()
+    }
+
+    private fun setCustomChatMaxMessages(maxMessages: Int) {
+        val normalized = maxMessages.coerceIn(0, Protocol.MAX_CHAT_MESSAGE_COUNT)
+        preferences.edit().putInt(PREF_CUSTOM_CHAT_MAX_MESSAGES, normalized).apply()
+        val nextMessages = uiState.customChatMessages.takeLast(normalized)
+        uiState = uiState.copy(
+            customChatMaxMessages = normalized,
+            customChatMessages = nextMessages,
+            customChatStatus = "Helper chat messages: $normalized"
+        )
+        sendCustomChatStyle()
+        runCatching { cxr.sendChatMessages(nextMessages) }
+    }
+
+    private fun sendCustomChatStyle() {
+        runCatching {
+            cxr.sendChatStyle(
+                fontSizeSp = uiState.customChatFontSizeSp,
+                maxMessages = uiState.customChatMaxMessages,
                 bottomOffsetDp = uiState.chatBottomOffsetDp
             )
         }
@@ -1619,6 +1790,7 @@ class MainActivity : ComponentActivity() {
 
     private fun startYoutubeLive() {
         if (uiState.twitchLive) stopTwitchLive()
+        if (uiState.customLive) stopCustomLive()
         youtubeCompleteJob?.cancel()
         val streamKey = uiState.youtubeStreamKey.trim()
         if (streamKey.isBlank()) {
@@ -1653,6 +1825,7 @@ class MainActivity : ComponentActivity() {
 
     private fun startTwitchLive() {
         if (uiState.youtubeLive) stopYoutubeLive()
+        if (uiState.customLive) stopCustomLive()
         val clientId = uiState.twitchDeviceClientId.trim()
         if (uiState.twitchConnected) {
             if (clientId.isBlank()) {
@@ -1770,6 +1943,48 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    private fun startCustomLive() {
+        val serverUrl = uiState.customRtmpServerUrl.trim()
+        val streamKey = uiState.customRtmpStreamKey.trim()
+        if (!serverUrl.startsWith("rtmp://") && !serverUrl.startsWith("rtmps://")) {
+            setError("Custom RTMP server URL must start with rtmp:// or rtmps://", null)
+            return
+        }
+        if (streamKey.isBlank()) {
+            setError("Paste your Custom RTMP stream key first", null)
+            return
+        }
+        if (uiState.youtubeLive) stopYoutubeLive()
+        if (uiState.twitchLive) stopTwitchLive()
+
+        applySelectedPreset()
+        val willTranscode = uiState.previewRotationDegrees.normalizedRotation() != 0 || YOUTUBE_FIX_HORIZONTAL_MIRROR
+        if (willTranscode) {
+            customPublisher.clearVideoState()
+        }
+        hidePreviewForStreaming("Custom RTMP")
+        customPublisher.start(
+            streamKey = streamKey,
+            preset = uiState.selectedPreset,
+            serverUrl = serverUrl,
+            fallbackServerUrls = emptyList(),
+            videoBitrate = selectedStreamingVideoBitrate(uiState.customVideoBitrateOverride)
+        )
+        if (willTranscode) {
+            startOrUpdateCustomVideoPipeline()
+        } else {
+            customVideoTranscoder?.stop()
+            customVideoTranscoder = null
+            lastVideoConfig?.let { customPublisher.configureVideo(it) }
+        }
+        startCustomChatIfPossible()
+        if (uiState.streaming || uiState.reverseRunning || uiState.receiverRunning) {
+            cxr.requestKeyFrame()
+        } else {
+            startP2pStream()
+        }
+    }
+
     private fun selectedStreamingVideoBitrate(overrideBitrate: Int): Int {
         val preset = uiState.selectedPreset
         val defaultOutputBitrate = preset.youtubeVideoBitrate.takeIf { it > 0 } ?: preset.videoBitrate
@@ -1809,6 +2024,15 @@ class MainActivity : ComponentActivity() {
         twitchPublisher.stop()
         stopCameraTransport()
         uiState = uiState.copy(twitchLive = false, twitchRtmpDiagnostics = RtmpDiagnostics())
+    }
+
+    private fun stopCustomLive() {
+        stopCustomChat(clearHelper = true)
+        customVideoTranscoder?.stop()
+        customVideoTranscoder = null
+        customPublisher.stop()
+        stopCameraTransport()
+        uiState = uiState.copy(customLive = false, customRtmpDiagnostics = RtmpDiagnostics())
     }
 
     private fun normalizedTwitchIngestServer(serverUrl: String): String =
@@ -2090,6 +2314,95 @@ class MainActivity : ComponentActivity() {
         )
     }
 
+    private fun startCustomChatIfPossible() {
+        if (!uiState.customChatEnabled) return
+        val channel = uiState.customChatChannel.trim().removePrefix("#").trim()
+        if (channel.isBlank()) {
+            uiState = uiState.copy(customChatStatus = "Enter a Twitch channel name")
+            return
+        }
+        sendCustomChatStyle()
+        if (customChatClient != null) return
+        customChatStopRequested = false
+        val recentMessages = ArrayDeque<ChatOverlayMessage>()
+        val seenIds = linkedMapOf<String, Long>()
+        customChatClient = TwitchAnonymousChatClient(
+            channel = channel,
+            onStatus = { status ->
+                onMain {
+                    val nextError = if (
+                        status == "Twitch chat connected (anonymous)" &&
+                        uiState.error.startsWith("Twitch anonymous chat")
+                    ) {
+                        ""
+                    } else {
+                        uiState.error
+                    }
+                    uiState = uiState.copy(customChatStatus = status, lastStatus = status, error = nextError)
+                }
+            },
+            onMessages = { messages ->
+                onMain {
+                    val nowMs = System.currentTimeMillis()
+                    val seenIterator = seenIds.entries.iterator()
+                    while (seenIterator.hasNext()) {
+                        if (nowMs - seenIterator.next().value > YOUTUBE_CHAT_SEEN_ID_TTL_MS) {
+                            seenIterator.remove()
+                        }
+                    }
+                    messages.forEach { message ->
+                        if (message.id.isNotBlank() && seenIds.containsKey(message.id)) return@forEach
+                        if (message.id.isNotBlank()) seenIds[message.id] = nowMs
+                        recentMessages.addLast(
+                            ChatOverlayMessage(
+                                author = message.author,
+                                text = message.text,
+                                timestampMs = nowMs
+                            )
+                        )
+                        val currentMaxMessages = uiState.customChatMaxMessages
+                            .coerceIn(0, Protocol.MAX_CHAT_MESSAGE_COUNT)
+                        while (recentMessages.size > currentMaxMessages) {
+                            recentMessages.removeFirst()
+                        }
+                    }
+                    val overlayMessages = recentMessages.toList()
+                        .takeLast(uiState.customChatMaxMessages.coerceIn(0, Protocol.MAX_CHAT_MESSAGE_COUNT))
+                    uiState = uiState.copy(
+                        customChatMessages = overlayMessages,
+                        customChatStatus = "Showing ${overlayMessages.size} chat messages on helper"
+                    )
+                    cxr.sendChatMessages(overlayMessages)
+                }
+            },
+            onError = { message, throwable ->
+                onMain {
+                    if (customChatStopRequested || throwable?.isCancellationLike() == true) {
+                        uiState = uiState.copy(customChatStatus = "Chat stopped")
+                    } else {
+                        setError(message, throwable)
+                        uiState = uiState.copy(customChatStatus = "Reconnecting anonymous Twitch chat...")
+                    }
+                }
+            }
+        ).also { it.start() }
+    }
+
+    private fun stopCustomChat(clearHelper: Boolean) {
+        customChatStopRequested = true
+        customChatClient?.stop()
+        customChatClient = null
+        if (clearHelper) {
+            runCatching { cxr.sendChatMessages(emptyList()) }
+        }
+        val nextError = if (uiState.error.startsWith("Twitch anonymous chat")) "" else uiState.error
+        uiState = uiState.copy(
+            customChatMessages = emptyList(),
+            customChatStatus = if (uiState.customChatEnabled) "Chat stopped" else uiState.customChatStatus,
+            error = nextError
+        )
+    }
+
     private fun isCurrentYoutubeLiveTarget(broadcastId: String, streamId: String): Boolean =
         uiState.youtubeLive &&
             uiState.youtubeBroadcastId == broadcastId &&
@@ -2175,6 +2488,46 @@ class MainActivity : ComponentActivity() {
         lastVideoConfig?.let { transcoder.configure(it) }
     }
 
+    private fun startOrUpdateCustomVideoPipeline() {
+        customVideoTranscoder?.stop()
+        customVideoTranscoder = null
+        val previewRotation = uiState.previewRotationDegrees.normalizedRotation()
+        val streamRotation = previewRotation.inverseRotation()
+        if (previewRotation == 0 && !YOUTUBE_FIX_HORIZONTAL_MIRROR) {
+            lastVideoConfig?.let { customPublisher.configureVideo(it) }
+            uiState = uiState.copy(customStatus = "Custom RTMP pass-through video")
+            return
+        }
+        val preset = uiState.selectedPreset
+        val naturalOutputWidth = if (streamRotation.isQuarterTurn()) preset.height else preset.width
+        val naturalOutputHeight = if (streamRotation.isQuarterTurn()) preset.width else preset.height
+        val outputWidth = preset.youtubeOutputWidth.takeIf { it > 0 } ?: naturalOutputWidth
+        val outputHeight = preset.youtubeOutputHeight.takeIf { it > 0 } ?: naturalOutputHeight
+        val defaultOutputBitrate = preset.youtubeVideoBitrate.takeIf { it > 0 } ?: preset.videoBitrate
+        val outputBitrate = uiState.customVideoBitrateOverride.takeIf { it > 0 } ?: defaultOutputBitrate
+        val transcoder = YoutubeVideoRotationTranscoder(
+            platformName = "Custom RTMP",
+            inputWidth = preset.width,
+            inputHeight = preset.height,
+            outputWidth = outputWidth,
+            outputHeight = outputHeight,
+            fps = preset.fps,
+            bitrate = outputBitrate,
+            iframeIntervalSeconds = preset.iframeIntervalSeconds,
+            rotationDegrees = streamRotation,
+            mirrorHorizontally = YOUTUBE_FIX_HORIZONTAL_MIRROR,
+            onConfig = { payload -> customPublisher.configureVideo(payload) },
+            onFrame = { payload, timestampUs, keyFrame -> customPublisher.publishVideoFrame(payload, timestampUs, keyFrame) },
+            onStatus = { status -> onMain { uiState = uiState.copy(customStatus = status, lastStatus = status) } },
+            onError = { message, throwable -> onMain { setError(message, throwable) } },
+            onInputBackpressure = { onMain { cxr.requestKeyFrame() } }
+        )
+        customVideoTranscoder = transcoder
+        customPublisher.clearVideoState()
+        transcoder.start()
+        lastVideoConfig?.let { transcoder.configure(it) }
+    }
+
     private fun defaultYoutubeTitle(): String =
         "Rokid POV ${java.time.LocalDateTime.now().toString().take(16).replace('T', ' ')}"
 
@@ -2206,7 +2559,7 @@ class MainActivity : ComponentActivity() {
     private fun handleReverseMediaError(message: String, throwable: Throwable?) {
         setError(message, throwable)
         uiState = uiState.copy(reverseRunning = false, streaming = false)
-        if (!uiState.youtubeLive && !uiState.twitchLive) stopLiveKeepAlive()
+        if (!uiState.youtubeLive && !uiState.twitchLive && !uiState.customLive) stopLiveKeepAlive()
     }
 
     private fun Throwable.isCancellationLike(): Boolean =
@@ -2291,6 +2644,13 @@ class MainActivity : ComponentActivity() {
         private const val PREF_TWITCH_CHAT_ENABLED = "twitch_chat_enabled"
         private const val PREF_TWITCH_CHAT_FONT_SIZE_SP = "twitch_chat_font_size_sp"
         private const val PREF_TWITCH_CHAT_MAX_MESSAGES = "twitch_chat_max_messages"
+        private const val PREF_CUSTOM_RTMP_SERVER_URL = "custom_rtmp_server_url"
+        private const val PREF_CUSTOM_RTMP_STREAM_KEY = "custom_rtmp_stream_key"
+        private const val PREF_CUSTOM_VIDEO_BITRATE = "custom_video_bitrate"
+        private const val PREF_CUSTOM_CHAT_ENABLED = "custom_chat_enabled"
+        private const val PREF_CUSTOM_CHAT_CHANNEL = "custom_chat_channel"
+        private const val PREF_CUSTOM_CHAT_FONT_SIZE_SP = "custom_chat_font_size_sp"
+        private const val PREF_CUSTOM_CHAT_MAX_MESSAGES = "custom_chat_max_messages"
         private const val YOUTUBE_FIX_HORIZONTAL_MIRROR = true
         private const val YOUTUBE_INGEST_POLL_ATTEMPTS = 24
         private const val YOUTUBE_INGEST_POLL_DELAY_MS = 2_500L
@@ -2321,6 +2681,7 @@ private enum class StudioTab(val label: String) {
     HOME("Home"),
     YOUTUBE("YouTube"),
     TWITCH("Twitch"),
+    CUSTOM("Custom RTMP"),
     SETTINGS("Settings")
 }
 
@@ -2410,12 +2771,21 @@ private fun PhoneScreen(
     onTwitchChatEnabledChange: (Boolean) -> Unit,
     onTwitchChatFontSizeSelected: (Int) -> Unit,
     onTwitchChatMaxMessagesSelected: (Int) -> Unit,
+    onCustomRtmpServerUrlChanged: (String) -> Unit,
+    onCustomRtmpKeyChanged: (String) -> Unit,
+    onCustomBitrateSelected: (Int) -> Unit,
+    onCustomChatEnabledChange: (Boolean) -> Unit,
+    onCustomChatChannelChanged: (String) -> Unit,
+    onCustomChatFontSizeSelected: (Int) -> Unit,
+    onCustomChatMaxMessagesSelected: (Int) -> Unit,
     onStartTwitchDeviceAuth: () -> Unit,
     onOpenTwitchDocs: () -> Unit,
     onDisconnectTwitch: () -> Unit,
     onRefreshTwitchChannel: () -> Unit,
     onStartTwitch: () -> Unit,
     onStopTwitch: () -> Unit,
+    onStartCustom: () -> Unit,
+    onStopCustom: () -> Unit,
     onPresetSelected: (VideoPreset) -> Unit,
     onPreviewRotationSelected: (Int) -> Unit,
     onStartYoutube: () -> Unit,
@@ -2523,6 +2893,28 @@ private fun PhoneScreen(
                     onStartTwitch = onStartTwitch,
                     onStopTwitch = onStopTwitch
                 )
+
+                StudioTab.CUSTOM -> CustomRtmpStudioScreen(
+                    state = state,
+                    showPreview = showPreview,
+                    onShowPreviewChange = { showPreview = it },
+                    onSurfaceReady = onSurfaceReady,
+                    onSurfaceGone = onSurfaceGone,
+                    onBack = { selectedTab = StudioTab.HOME },
+                    onServerUrlChanged = onCustomRtmpServerUrlChanged,
+                    onStreamKeyChanged = onCustomRtmpKeyChanged,
+                    onBitrateSelected = onCustomBitrateSelected,
+                    onChatEnabledChange = onCustomChatEnabledChange,
+                    onChatChannelChanged = onCustomChatChannelChanged,
+                    onChatFontSizeSelected = onCustomChatFontSizeSelected,
+                    onChatMaxMessagesSelected = onCustomChatMaxMessagesSelected,
+                    onChatBottomOffsetSelected = onChatBottomOffsetSelected,
+                    onPresetSelected = onPresetSelected,
+                    onPreviewRotationSelected = onPreviewRotationSelected,
+                    onStartCustom = onStartCustom,
+                    onStopCustom = onStopCustom
+                )
+
                 StudioTab.SETTINGS -> SettingsStudioScreen(
                     state = state,
                     onOpenReleases = onOpenReleases,
@@ -2530,7 +2922,11 @@ private fun PhoneScreen(
                 )
             }
 
-            if (selectedTab != StudioTab.YOUTUBE && selectedTab != StudioTab.TWITCH) {
+            if (
+                selectedTab != StudioTab.YOUTUBE &&
+                selectedTab != StudioTab.TWITCH &&
+                selectedTab != StudioTab.CUSTOM
+            ) {
                 BottomStudioNav(
                     selectedTab = selectedTab,
                     onSelectTab = { selectedTab = it },
@@ -3390,6 +3786,173 @@ private fun TwitchStudioScreen(
 }
 
 @Composable
+private fun CustomRtmpStudioScreen(
+    state: PhoneUiState,
+    showPreview: Boolean,
+    onShowPreviewChange: (Boolean) -> Unit,
+    onSurfaceReady: (AndroidSurface) -> Unit,
+    onSurfaceGone: () -> Unit,
+    onBack: () -> Unit,
+    onServerUrlChanged: (String) -> Unit,
+    onStreamKeyChanged: (String) -> Unit,
+    onBitrateSelected: (Int) -> Unit,
+    onChatEnabledChange: (Boolean) -> Unit,
+    onChatChannelChanged: (String) -> Unit,
+    onChatFontSizeSelected: (Int) -> Unit,
+    onChatMaxMessagesSelected: (Int) -> Unit,
+    onChatBottomOffsetSelected: (Int) -> Unit,
+    onPresetSelected: (VideoPreset) -> Unit,
+    onPreviewRotationSelected: (Int) -> Unit,
+    onStartCustom: () -> Unit,
+    onStopCustom: () -> Unit
+) {
+    var showKey by remember { mutableStateOf(false) }
+    val clipboard = LocalClipboardManager.current
+    val canUsePrimaryButton = state.customLive ||
+        (state.customRtmpServerUrl.isNotBlank() && state.customRtmpStreamKey.isNotBlank())
+
+    Box(modifier = Modifier.fillMaxSize()) {
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .verticalScroll(rememberScrollState())
+                .padding(bottom = 112.dp)
+        ) {
+            CustomRtmpTopBar(onBack = onBack)
+
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(start = 14.dp, top = 12.dp, end = 14.dp, bottom = 20.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                StudioTextInputCard(
+                    icon = StudioIcon.NETWORK,
+                    label = "RTMP Server URL",
+                    value = state.customRtmpServerUrl,
+                    onValueChange = onServerUrlChanged,
+                    placeholder = "rtmp://host/app",
+                    enabled = !state.customLive,
+                    helperText = "Direct RTMP/RTMPS destination. No YouTube or Twitch API is used."
+                )
+
+                StudioTextInputCard(
+                    icon = StudioIcon.KEY,
+                    label = "Stream Key",
+                    value = state.customRtmpStreamKey,
+                    onValueChange = onStreamKeyChanged,
+                    placeholder = "Paste the gateway stream key",
+                    password = !showKey,
+                    enabled = !state.customLive,
+                    helperText = "Stored securely on this phone.",
+                    trailing = {
+                        Row(
+                            horizontalArrangement = Arrangement.spacedBy(12.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                if (showKey) "Hide" else "Show",
+                                color = StudioGreen,
+                                fontSize = 14.sp,
+                                fontWeight = FontWeight.Bold,
+                                modifier = Modifier.clickable { showKey = !showKey }
+                            )
+                            IconGlyph(
+                                StudioIcon.COPY,
+                                StudioMuted,
+                                Modifier
+                                    .size(24.dp)
+                                    .clickable {
+                                        if (state.customRtmpStreamKey.isNotBlank()) {
+                                            clipboard.setText(AnnotatedString(state.customRtmpStreamKey))
+                                        }
+                                    }
+                            )
+                        }
+                    }
+                )
+
+                StudioSelectCard(
+                    label = "Resolution",
+                    value = state.selectedPreset.youtubeResolutionLabel(state.previewRotationDegrees),
+                    icon = StudioIcon.VIDEO,
+                    enabled = !state.customLive,
+                    options = VideoPreset.Visible,
+                    selected = state.selectedPreset,
+                    onSelected = onPresetSelected
+                )
+                ResolutionHeatWarning(state.selectedPreset)
+
+                PlatformBitrateCard(
+                    platformName = "Custom RTMP",
+                    selectedBitrate = state.customVideoBitrateOverride,
+                    autoBitrate = state.selectedPreset.defaultYoutubeBitrate(),
+                    enabled = !state.customLive,
+                    onSelected = onBitrateSelected
+                )
+
+                CustomRtmpStatsCard(
+                    live = state.customLive,
+                    status = state.customStatus,
+                    bytesSent = state.customBytesSent
+                )
+
+                RtmpDiagnosticCard(
+                    platformName = "Custom RTMP",
+                    diagnostics = state.customRtmpDiagnostics
+                )
+
+                PreviewHudCard(
+                    state = state,
+                    showPreview = showPreview,
+                    previewActionLabel = "Hide Preview",
+                    onShowPreviewChange = onShowPreviewChange,
+                    onSurfaceReady = onSurfaceReady,
+                    onSurfaceGone = onSurfaceGone
+                )
+
+                ErrorBanner(state.error)
+
+                RotationSelector(
+                    selectedRotation = state.previewRotationDegrees,
+                    enabled = !state.customLive,
+                    onSelected = onPreviewRotationSelected
+                )
+
+                CustomChatCard(
+                    state = state,
+                    onEnabledChange = onChatEnabledChange,
+                    onChannelChanged = onChatChannelChanged,
+                    onFontSizeSelected = onChatFontSizeSelected,
+                    onMaxMessagesSelected = onChatMaxMessagesSelected,
+                    onBottomOffsetSelected = onChatBottomOffsetSelected
+                )
+            }
+        }
+
+        Box(
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .fillMaxWidth()
+                .height(118.dp)
+                .background(Brush.verticalGradient(listOf(Color.Transparent, StudioBgBottom, StudioBgBottom)))
+        )
+
+        StudioPrimaryButton(
+            text = if (state.customLive) "End Custom RTMP Stream" else "Start Custom RTMP Stream",
+            icon = if (state.customLive) StudioIcon.STOP else StudioIcon.BROADCAST,
+            enabled = canUsePrimaryButton,
+            onClick = {
+                if (state.customLive) onStopCustom() else onStartCustom()
+            },
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .padding(start = 14.dp, end = 14.dp, bottom = 18.dp)
+        )
+    }
+}
+
+@Composable
 private fun SettingsStudioScreen(
     state: PhoneUiState,
     onOpenReleases: () -> Unit,
@@ -3589,6 +4152,55 @@ private fun TwitchTopBar(
                 .fillMaxWidth()
                 .height(3.dp)
                 .background(StudioPurple)
+        )
+    }
+}
+
+@Composable
+private fun CustomRtmpTopBar(
+    onBack: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Column(
+        modifier = modifier
+            .fillMaxWidth()
+            .background(StudioBgTop),
+        verticalArrangement = Arrangement.spacedBy(10.dp)
+    ) {
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(62.dp)
+        ) {
+            Box(
+                modifier = Modifier
+                    .align(Alignment.CenterStart)
+                    .padding(start = 8.dp)
+                    .size(52.dp)
+                    .clip(CircleShape)
+                    .clickable(onClick = onBack),
+                contentAlignment = Alignment.Center
+            ) {
+                Image(
+                    painter = painterResource(R.drawable.ic_ui_arrow_back),
+                    contentDescription = "Back",
+                    modifier = Modifier.size(31.dp)
+                )
+            }
+            Row(
+                modifier = Modifier.align(Alignment.Center),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                IconGlyph(StudioIcon.BROADCAST, StudioGreen, Modifier.size(34.dp))
+                Text("Custom RTMP", color = StudioText, fontSize = 27.sp, fontWeight = FontWeight.Light)
+            }
+        }
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(3.dp)
+                .background(StudioGreen)
         )
     }
 }
@@ -4275,6 +4887,43 @@ private fun PlatformBitrateCard(
 }
 
 @Composable
+private fun CustomRtmpStatsCard(
+    live: Boolean,
+    status: String,
+    bytesSent: Long
+) {
+    StudioCard(modifier = Modifier.heightIn(min = 74.dp)) {
+        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                IconGlyph(StudioIcon.BROADCAST, if (live) StudioGreen else StudioMuted, Modifier.size(22.dp))
+                Text("Custom RTMP stream", color = StudioText, fontSize = 15.sp, fontWeight = FontWeight.Bold)
+            }
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.Top
+            ) {
+                MiniMetric("State", if (live) "Live" else "Stopped")
+                MiniMetric("Bytes sent", "$bytesSent B")
+            }
+            if (status.isNotBlank()) {
+                Text(
+                    status,
+                    color = StudioMuted,
+                    fontSize = 11.sp,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+        }
+    }
+}
+
+@Composable
 private fun RtmpDiagnosticCard(
     platformName: String,
     diagnostics: RtmpDiagnostics
@@ -4724,6 +5373,143 @@ private fun TwitchChatCard(
             if (state.twitchChatMessages.isNotEmpty()) {
                 Column(verticalArrangement = Arrangement.spacedBy(5.dp)) {
                     state.twitchChatMessages.takeLast(3).forEach { message ->
+                        Text(
+                            "${message.author}: ${message.text}",
+                            color = StudioText.copy(alpha = 0.9f),
+                            fontSize = 12.sp,
+                            lineHeight = 16.sp,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun CustomChatCard(
+    state: PhoneUiState,
+    onEnabledChange: (Boolean) -> Unit,
+    onChannelChanged: (String) -> Unit,
+    onFontSizeSelected: (Int) -> Unit,
+    onMaxMessagesSelected: (Int) -> Unit,
+    onBottomOffsetSelected: (Int) -> Unit
+) {
+    StudioCard {
+        Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                IconGlyph(StudioIcon.TWITCH, StudioPurple, Modifier.size(28.dp))
+                Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Text(
+                        "Anonymous Twitch Chat",
+                        color = StudioText,
+                        fontSize = 17.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Text(
+                        when {
+                            state.customChatStatus.isNotBlank() -> state.customChatStatus
+                            state.customChatEnabled -> "Waiting for Twitch chat."
+                            else -> "Read-only chat needs only a channel name; helper renders the messages."
+                        },
+                        color = StudioMuted,
+                        fontSize = 12.sp,
+                        lineHeight = 16.sp
+                    )
+                }
+                Switch(
+                    checked = state.customChatEnabled,
+                    onCheckedChange = onEnabledChange,
+                    colors = SwitchDefaults.colors(
+                        checkedThumbColor = Color.White,
+                        checkedTrackColor = StudioPurple,
+                        uncheckedThumbColor = StudioMuted,
+                        uncheckedTrackColor = Color(0xFF242A28)
+                    )
+                )
+            }
+
+            Column(verticalArrangement = Arrangement.spacedBy(7.dp)) {
+                Text(
+                    "Twitch channel",
+                    color = StudioText,
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Bold
+                )
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(42.dp)
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(Color(0xFF0D1110))
+                        .border(1.dp, StudioBorder, RoundedCornerShape(10.dp))
+                        .padding(horizontal = 12.dp),
+                    contentAlignment = Alignment.CenterStart
+                ) {
+                    BasicTextField(
+                        value = state.customChatChannel,
+                        onValueChange = onChannelChanged,
+                        textStyle = TextStyle(
+                            color = StudioText,
+                            fontSize = 14.sp,
+                            fontWeight = FontWeight.Medium
+                        ),
+                        singleLine = true,
+                        cursorBrush = SolidColor(StudioGreen),
+                        modifier = Modifier.fillMaxWidth(),
+                        decorationBox = { innerTextField ->
+                            Box {
+                                if (state.customChatChannel.isBlank()) {
+                                    Text(
+                                        "channelname",
+                                        color = StudioMuted.copy(alpha = 0.75f),
+                                        fontSize = 14.sp
+                                    )
+                                }
+                                innerTextField()
+                            }
+                        }
+                    )
+                }
+                Text(
+                    "Connects anonymously to Twitch IRC. No OAuth token, client ID, or developer app is required.",
+                    color = StudioMuted,
+                    fontSize = 11.sp,
+                    lineHeight = 15.sp
+                )
+            }
+
+            ChatFontStepperRow(
+                selected = state.customChatFontSizeSp,
+                enabled = true,
+                onDecrease = { onFontSizeSelected(state.customChatFontSizeSp - 1) },
+                onIncrease = { onFontSizeSelected(state.customChatFontSizeSp + 1) },
+                onReset = { onFontSizeSelected(Protocol.DEFAULT_CHAT_FONT_SIZE_SP) }
+            )
+            ChatMessageStepperRow(
+                selected = state.customChatMaxMessages,
+                enabled = true,
+                onDecrease = { onMaxMessagesSelected(state.customChatMaxMessages - 1) },
+                onIncrease = { onMaxMessagesSelected(state.customChatMaxMessages + 1) },
+                onReset = { onMaxMessagesSelected(Protocol.DEFAULT_CHAT_MAX_MESSAGES) }
+            )
+            ChatBottomOffsetStepperRow(
+                selected = state.chatBottomOffsetDp,
+                enabled = true,
+                onDecrease = { onBottomOffsetSelected(previousChatBottomOffset(state.chatBottomOffsetDp)) },
+                onIncrease = { onBottomOffsetSelected(nextChatBottomOffset(state.chatBottomOffsetDp)) },
+                onReset = { onBottomOffsetSelected(Protocol.DEFAULT_CHAT_BOTTOM_OFFSET_DP) }
+            )
+
+            if (state.customChatMessages.isNotEmpty()) {
+                Column(verticalArrangement = Arrangement.spacedBy(5.dp)) {
+                    state.customChatMessages.takeLast(3).forEach { message ->
                         Text(
                             "${message.author}: ${message.text}",
                             color = StudioText.copy(alpha = 0.9f),
@@ -5532,12 +6318,14 @@ private fun BottomNavItem(tab: StudioTab, selected: Boolean, onClick: () -> Unit
         StudioTab.HOME -> StudioGreen
         StudioTab.YOUTUBE -> StudioRed
         StudioTab.TWITCH -> StudioPurple
+        StudioTab.CUSTOM -> StudioGreen
         StudioTab.SETTINGS -> if (selected) StudioGreen else StudioMuted
     }
     val icon = when (tab) {
         StudioTab.HOME -> StudioIcon.HOME
         StudioTab.YOUTUBE -> StudioIcon.YOUTUBE
         StudioTab.TWITCH -> StudioIcon.TWITCH
+        StudioTab.CUSTOM -> StudioIcon.BROADCAST
         StudioTab.SETTINGS -> StudioIcon.SETTINGS
     }
     Column(
