@@ -665,7 +665,16 @@ class YoutubeRtmpPublisher(
         }
 
         private fun openSocket(scheme: String, host: String, port: Int): Socket {
-            val rawSocket = socketFactory?.createSocket() ?: Socket()
+            // A Network-bound factory can fail at createSocket() with EPERM when its
+            // Network handle has gone stale; fall back to the default network rather
+            // than failing every reconnect attempt with the same dead binding.
+            val rawSocket = socketFactory?.let { factory ->
+                runCatching { factory.createSocket() }.getOrElse { throwable ->
+                    if (throwable !is SocketException) throw throwable
+                    Log.i(TAG, "$platformName network binding unavailable, using default network")
+                    null
+                }
+            } ?: Socket()
             rawSocket.connect(InetSocketAddress(host, port), CONNECT_TIMEOUT_MS)
             rawSocket.tcpNoDelay = true
             rawSocket.keepAlive = true
